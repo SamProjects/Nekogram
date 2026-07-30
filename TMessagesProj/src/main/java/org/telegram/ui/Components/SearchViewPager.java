@@ -639,6 +639,21 @@ public class SearchViewPager extends ViewPagerFixed implements FilteredSearchVie
         return viewPagerAdapter != null && viewPagerAdapter.getItemViewType(position) == 2;
     }
 
+    public boolean isMediaTab(int position) {
+        if (viewPagerAdapter == null || position < 0 || position >= viewPagerAdapter.items.size()) {
+            return false;
+        }
+        ViewPagerAdapter.Item item = viewPagerAdapter.items.get(position);
+        return item.type == ViewPagerAdapter.FILTER_TYPE && item.filterIndex == 0;
+    }
+
+    public void showMediaFilterDialog() {
+        View currentView = getCurrentView();
+        if (isMediaTab(getCurrentPosition()) && currentView instanceof FilteredSearchView) {
+            ((FilteredSearchView) currentView).showMediaFilterDialog();
+        }
+    }
+
     public ActionBarMenu getActionMode() {
         return actionMode;
     }
