@@ -513,6 +513,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     public ActionBarMenuItem searchItem;
     private ActionBarMenuItem optionsItem;
     private ActionBarMenuItem speedItem;
+    private ActionBarMenuItem mediaFilterItem;
     public static boolean switchingTheme;
     private ActionBarMenuItem doneItem;
     private ProxyDrawable proxyDrawable;
@@ -3325,6 +3326,17 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
             fragmentSearchField.addAdditionalIcon(speedItem);
             fragmentSearchField.updateColors();
         }
+        mediaFilterItem = menu.addItem(-48, R.drawable.ic_filter_list);
+        AndroidUtilities.removeFromParent(mediaFilterItem);
+        mediaFilterItem.setContentDescription(getString(R.string.MediaFilterTitle));
+        mediaFilterItem.setOnClickListener(v -> {
+            if (searchViewPager != null) {
+                searchViewPager.showMediaFilterDialog();
+            }
+        });
+        mediaFilterItem.setVisibility(View.GONE);
+        fragmentSearchField.addAdditionalIcon(mediaFilterItem);
+        fragmentSearchField.updateColors();
 
         fragmentSearchField.setCloseButtonOnClickListener(() -> {
             if (searchViewPager != null && searchViewPager.actionModeShowing()) {
@@ -6789,6 +6801,12 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         animatorSpeedButtonVisible.setValue(visible, true);
     }
 
+    private void updateMediaFilterItem(boolean visible) {
+        if (mediaFilterItem != null) {
+            mediaFilterItem.setVisibility(searchIsShowed && visible ? View.VISIBLE : View.GONE);
+        }
+    }
+
     private void createActionMode(String tag) {
         if (actionBar.actionModeIsExist(tag)) {
             return;
@@ -7552,6 +7570,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
 
         if (!show) {
             updateSpeedItem(false);
+            updateMediaFilterItem(false);
         } else {
             createSearchViewPager();
         }
@@ -7789,6 +7808,9 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         if (show && startFromDownloads && searchViewPager != null) {
             searchViewPager.showDownloads();
             updateSpeedItem(true);
+        }
+        if (show && searchViewPager != null) {
+            updateMediaFilterItem(searchViewPager.isMediaTab(searchViewPager.getCurrentPosition()));
         }
 
         checkUi_searchFiltersVisibility();
@@ -13003,6 +13025,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
             @Override
             protected void onTabPageSelected(int position) {
                 updateSpeedItem(isDownloadsTab(position));
+                updateMediaFilterItem(isMediaTab(position));
             }
 
             @Override

@@ -11,6 +11,7 @@ import android.animation.ObjectAnimator;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -20,12 +21,17 @@ import android.os.Build;
 import android.text.SpannableStringBuilder;
 import android.text.TextPaint;
 import android.text.TextUtils;
+import android.text.InputType;
+import android.util.TypedValue;
 import android.util.SparseArray;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.widget.FrameLayout;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 import androidx.core.content.ContextCompat;
@@ -56,6 +62,7 @@ import org.telegram.tgnet.TLMethod;
 import org.telegram.tgnet.TLObject;
 import org.telegram.tgnet.TLRPC;
 import org.telegram.ui.ActionBar.BaseFragment;
+import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BottomSheet;
 import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.ActionBar.ThemeDescription;
@@ -71,6 +78,7 @@ import org.telegram.ui.Cells.SharedDocumentCell;
 import org.telegram.ui.Cells.SharedLinkCell;
 import org.telegram.ui.Cells.SharedMediaSectionCell;
 import org.telegram.ui.Cells.SharedPhotoVideoCell;
+import org.telegram.ui.Cells.TextCheckCell;
 import org.telegram.ui.Components.AlertsCreator;
 import org.telegram.ui.Components.AnimatedTextView;
 import org.telegram.ui.Components.BackupImageView;
@@ -109,6 +117,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     Runnable searchRunnable;
 
     public ArrayList<MessageObject> messages = new ArrayList<>();
+    private final ArrayList<MessageObject> rawMessages = new ArrayList<>();
     public SparseArray<MessageObject> messagesById = new SparseArray<>();
     public ArrayList<String> sections = new ArrayList<>();
     public HashMap<String, ArrayList<MessageObject>> sectionArrays = new HashMap<>();
@@ -132,6 +141,14 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     private boolean endReached;
     private int totalCount;
     private int requestIndex;
+    private boolean hidePhotoOnlyMedia;
+    private boolean hideShortVideos;
+    private int shortVideoThresholdSeconds = 60;
+
+    private static final String MEDIA_FILTER_PREFERENCES = "media_group_filter";
+    private static final String PREF_HIDE_PHOTOS = "hide_photo_only";
+    private static final String PREF_HIDE_SHORT_VIDEOS = "hide_short_videos";
+    private static final String PREF_SHORT_VIDEO_SECONDS = "short_video_seconds";
 
     private String currentDataQuery;
 
@@ -158,6 +175,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         public void run() {
             if (isLoading) {
                 messages.clear();
+                rawMessages.clear();
                 sections.clear();
                 sectionArrays.clear();
                 if (adapter != null) {
@@ -171,6 +189,9 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
 
         @Override
         public int getTotalImageCount() {
+            if (isCustomMediaFilterActive()) {
+                return messages.size() + (endReached ? 0 : 1);
+            }
             return totalCount;
         }
 
@@ -291,6 +312,10 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         super(fragment.getParentActivity());
         parentFragment = fragment;
         Context context = parentActivity = fragment.getParentActivity();
+        SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences(MEDIA_FILTER_PREFERENCES, Context.MODE_PRIVATE);
+        hidePhotoOnlyMedia = preferences.getBoolean(PREF_HIDE_PHOTOS, false);
+        hideShortVideos = preferences.getBoolean(PREF_HIDE_SHORT_VIDEOS, false);
+        shortVideoThresholdSeconds = Math.max(0, preferences.getInt(PREF_SHORT_VIDEO_SECONDS, 60));
         setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
         recyclerListView = new RecyclerListView(context) {
 
@@ -456,6 +481,230 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         checkUi_floatingDateView();
     }
 
+    public void showMediaFilterDialog() {
+        Context context = getContext();
+        if (context == null) {
+            return;
+        }
+
+        LinearLayout container = new LinearLayout(context);
+        container.setOrientation(LinearLayout.VERTICAL);
+
+        TextCheckCell photoCell = new TextCheckCell(context, 21, true);
+        photoCell.setTextAndCheck(getString(R.string.MediaFilterHidePhotos), hidePhotoOnlyMedia, false);
+        photoCell.setBackground(Theme.getSelectorDrawable(false));
+        photoCell.setOnClickListener(v -> photoCell.setChecked(!photoCell.isChecked()));
+        container.addView(photoCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 50));
+
+        TextCheckCell durationCell = new TextCheckCell(context, 21, true);
+        durationCell.setTextAndCheck(getString(R.string.MediaFilterHideShortVideos), hideShortVideos, false);
+        durationCell.setBackground(Theme.getSelectorDrawable(false));
+        container.addView(durationCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 50));
+
+        LinearLayout durationRow = new LinearLayout(context);
+        durationRow.setOrientation(LinearLayout.HORIZONTAL);
+        durationRow.setGravity(Gravity.CENTER_VERTICAL);
+        durationRow.setPadding(dp(24), 0, dp(24), dp(8));
+
+        EditText minutesInput = createDurationInput(context, shortVideoThresholdSeconds / 60);
+        EditText secondsInput = createDurationInput(context, shortVideoThresholdSeconds % 60);
+        durationRow.addView(minutesInput, new LinearLayout.LayoutParams(0, dp(48), 1));
+        durationRow.addView(createDurationLabel(context, getString(R.string.MediaFilterMinutes)), LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0, 8, 0, 16, 0));
+        durationRow.addView(secondsInput, new LinearLayout.LayoutParams(0, dp(48), 1));
+        durationRow.addView(createDurationLabel(context, getString(R.string.MediaFilterSeconds)), LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0, 8, 0, 0, 0));
+        container.addView(durationRow, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 56));
+
+        Runnable updateDurationEnabled = () -> {
+            boolean enabled = durationCell.isChecked();
+            minutesInput.setEnabled(enabled);
+            secondsInput.setEnabled(enabled);
+            durationRow.setAlpha(enabled ? 1f : 0.5f);
+        };
+        durationCell.setOnClickListener(v -> {
+            durationCell.setChecked(!durationCell.isChecked());
+            updateDurationEnabled.run();
+        });
+        updateDurationEnabled.run();
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(context, parentFragment.getResourceProvider());
+        builder.setTitle(getString(R.string.MediaFilterTitle));
+        builder.setView(container);
+        builder.setNegativeButton(getString(R.string.Cancel), null);
+        builder.setNeutralButton(getString(R.string.Reset), (dialog, which) -> applyMediaFilter(false, false, 60));
+        builder.setPositiveButton(getString(R.string.ApplyTheme), (dialog, which) -> {
+            int minutes = parseDurationValue(minutesInput, 0, 999);
+            int seconds = parseDurationValue(secondsInput, 0, 59);
+            applyMediaFilter(photoCell.isChecked(), durationCell.isChecked(), minutes * 60 + seconds);
+        });
+        parentFragment.showDialog(builder.create());
+    }
+
+    private EditText createDurationInput(Context context, int value) {
+        EditText editText = new EditText(context);
+        editText.setText(String.valueOf(value));
+        editText.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
+        editText.setTextColor(Theme.getColor(Theme.key_dialogTextBlack, parentFragment.getResourceProvider()));
+        editText.setGravity(Gravity.CENTER);
+        editText.setSingleLine(true);
+        editText.setSelectAllOnFocus(true);
+        editText.setInputType(InputType.TYPE_CLASS_NUMBER);
+        editText.setBackground(Theme.createEditTextDrawable(context, true));
+        return editText;
+    }
+
+    private TextView createDurationLabel(Context context, CharSequence text) {
+        TextView textView = new TextView(context);
+        textView.setText(text);
+        textView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 15);
+        textView.setTextColor(Theme.getColor(Theme.key_dialogTextBlack, parentFragment.getResourceProvider()));
+        textView.setGravity(Gravity.CENTER_VERTICAL);
+        return textView;
+    }
+
+    private int parseDurationValue(EditText editText, int min, int max) {
+        try {
+            return Math.max(min, Math.min(max, Integer.parseInt(editText.getText().toString())));
+        } catch (Exception ignore) {
+            return min;
+        }
+    }
+
+    private void applyMediaFilter(boolean hidePhotos, boolean hideShort, int thresholdSeconds) {
+        hidePhotoOnlyMedia = hidePhotos;
+        hideShortVideos = hideShort;
+        shortVideoThresholdSeconds = Math.max(0, thresholdSeconds);
+        ApplicationLoader.applicationContext.getSharedPreferences(MEDIA_FILTER_PREFERENCES, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(PREF_HIDE_PHOTOS, hidePhotoOnlyMedia)
+                .putBoolean(PREF_HIDE_SHORT_VIDEOS, hideShortVideos)
+                .putInt(PREF_SHORT_VIDEO_SECONDS, shortVideoThresholdSeconds)
+                .apply();
+        rebuildVisibleMessages();
+        if (adapter != null) {
+            adapter.notifyDataSetChanged();
+        }
+        layoutManager.scrollToPositionWithOffset(0, 0);
+        loadMoreForActiveFilterIfNeeded();
+    }
+
+    private boolean isCustomMediaFilterActive() {
+        return currentSearchFilter != null
+                && currentSearchFilter.filterType == FiltersView.FILTER_TYPE_MEDIA
+                && (hidePhotoOnlyMedia || hideShortVideos);
+    }
+
+    private void rebuildVisibleMessages() {
+        messages.clear();
+        messagesById.clear();
+        sections.clear();
+        sectionArrays.clear();
+
+        if (!isCustomMediaFilterActive()) {
+            messages.addAll(rawMessages);
+        } else {
+            HashMap<String, ArrayList<MessageObject>> groups = new HashMap<>();
+            for (MessageObject messageObject : rawMessages) {
+                String groupKey = getMediaGroupKey(messageObject);
+                if (groupKey != null) {
+                    ArrayList<MessageObject> group = groups.get(groupKey);
+                    if (group == null) {
+                        group = new ArrayList<>();
+                        groups.put(groupKey, group);
+                    }
+                    group.add(messageObject);
+                }
+            }
+
+            String pendingGroupKey = null;
+            if (!endReached && !rawMessages.isEmpty()) {
+                pendingGroupKey = getMediaGroupKey(rawMessages.get(rawMessages.size() - 1));
+            }
+            HashMap<String, Boolean> groupVisibility = new HashMap<>();
+            for (MessageObject messageObject : rawMessages) {
+                String groupKey = getMediaGroupKey(messageObject);
+                if (groupKey == null) {
+                    if (shouldShowStandaloneMedia(messageObject)) {
+                        messages.add(messageObject);
+                    }
+                    continue;
+                }
+                if (groupKey.equals(pendingGroupKey)) {
+                    continue;
+                }
+                Boolean show = groupVisibility.get(groupKey);
+                if (show == null) {
+                    show = shouldShowMediaGroup(groups.get(groupKey));
+                    groupVisibility.put(groupKey, show);
+                }
+                if (show) {
+                    messages.add(messageObject);
+                }
+            }
+        }
+
+        for (MessageObject messageObject : messages) {
+            ArrayList<MessageObject> messageObjectsByDate = sectionArrays.get(messageObject.monthKey);
+            if (messageObjectsByDate == null) {
+                messageObjectsByDate = new ArrayList<>();
+                sectionArrays.put(messageObject.monthKey, messageObjectsByDate);
+                sections.add(messageObject.monthKey);
+            }
+            messageObjectsByDate.add(messageObject);
+            messagesById.put(messageObject.getId(), messageObject);
+        }
+    }
+
+    private String getMediaGroupKey(MessageObject messageObject) {
+        long groupId = messageObject.getGroupId();
+        if (groupId == 0) {
+            return null;
+        }
+        return messageObject.getDialogId() + ":" + groupId;
+    }
+
+    private boolean shouldShowStandaloneMedia(MessageObject messageObject) {
+        if (hidePhotoOnlyMedia && messageObject.isPhoto()) {
+            return false;
+        }
+        return !hideShortVideos || !isShortVideo(messageObject);
+    }
+
+    private boolean shouldShowMediaGroup(ArrayList<MessageObject> group) {
+        boolean hasVideo = false;
+        boolean allItemsArePhotos = true;
+        boolean allVideosAreShort = true;
+        for (MessageObject messageObject : group) {
+            if (messageObject.isVideo()) {
+                hasVideo = true;
+                allItemsArePhotos = false;
+                if (!isShortVideo(messageObject)) {
+                    allVideosAreShort = false;
+                }
+            } else if (!messageObject.isPhoto()) {
+                allItemsArePhotos = false;
+            }
+        }
+        if (hidePhotoOnlyMedia && allItemsArePhotos) {
+            return false;
+        }
+        return !hideShortVideos || !hasVideo || !allVideosAreShort;
+    }
+
+    private boolean isShortVideo(MessageObject messageObject) {
+        if (!messageObject.isVideo()) {
+            return false;
+        }
+        double duration = messageObject.getDuration();
+        return duration > 0 && duration < shortVideoThresholdSeconds;
+    }
+
+    private void loadMoreForActiveFilterIfNeeded() {
+        if (isCustomMediaFilterActive() && !isLoading && !endReached && messages.size() < columnsCount * 6) {
+            AndroidUtilities.runOnUIThread(() -> search(currentSearchDialogId, currentSearchCommunityId, currentSearchMinDate,
+                    currentSearchMaxDate, currentSearchFilter, currentIncludeFolder, lastMessagesSearchString, false));
+        }
+    }
+
     BlurredBackgroundDrawableViewFactory blurredBackgroundDrawableFactory;
 
     public void setBlurredBackgroundDrawableFactory(BlurredBackgroundDrawableViewFactory factory) {
@@ -590,6 +839,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         }
         if (forceClear || currentSearchFilter == null && communityId == 0 && dialogId == 0 && minDate == 0 && maxDate == 0) {
             messages.clear();
+            rawMessages.clear();
             sections.clear();
             sectionArrays.clear();
             isLoading = true;
@@ -647,8 +897,8 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 if (maxDate > 0) {
                     req.max_date = (int) (maxDate / 1000);
                 }
-                if (filterAndQueryIsSame && finalQuery.equals(lastMessagesSearchString) && !messages.isEmpty()) {
-                    MessageObject lastMessage = messages.get(messages.size() - 1);
+                if (filterAndQueryIsSame && finalQuery.equals(lastMessagesSearchString) && !rawMessages.isEmpty()) {
+                    MessageObject lastMessage = rawMessages.get(rawMessages.size() - 1);
                     req.offset_id = lastMessage.getId();
                 } else {
                     req.offset_id = 0;
@@ -673,8 +923,8 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 if (maxDate > 0) {
                     req.max_date = (int) (maxDate / 1000);
                 }
-                if (filterAndQueryIsSame && finalQuery.equals(lastMessagesSearchString) && !messages.isEmpty()) {
-                    MessageObject lastMessage = messages.get(messages.size() - 1);
+                if (filterAndQueryIsSame && finalQuery.equals(lastMessagesSearchString) && !rawMessages.isEmpty()) {
+                    MessageObject lastMessage = rawMessages.get(rawMessages.size() - 1);
                     req.offset_id = lastMessage.getId();
                     req.offset_rate = nextSearchRate;
                     long id = MessageObject.getPeerId(lastMessage.messageOwner.peer_id);
@@ -727,8 +977,10 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                     MessagesStorage.getInstance(currentAccount).putUsersAndChats(res.users, res.chats, true, true);
                     MessagesController.getInstance(currentAccount).putUsers(res.users, false);
                     MessagesController.getInstance(currentAccount).putChats(res.chats, false);
+                    ArrayList<MessageObject> previouslyVisibleMessages = new ArrayList<>(messages);
                     if (!filterAndQueryIsSame) {
                         messages.clear();
+                        rawMessages.clear();
                         messagesById.clear();
                         sections.clear();
                         sectionArrays.clear();
@@ -737,25 +989,20 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                     currentDataQuery = finalQuery;
                     int n = messageObjects.size();
                     for (int i = 0; i < n; i++) {
-                        MessageObject messageObject = messageObjects.get(i);
-                        ArrayList<MessageObject> messageObjectsByDate = sectionArrays.get(messageObject.monthKey);
-                        if (messageObjectsByDate == null) {
-                            messageObjectsByDate = new ArrayList<>();
-                            sectionArrays.put(messageObject.monthKey, messageObjectsByDate);
-                            sections.add(messageObject.monthKey);
-                        }
-                        messageObjectsByDate.add(messageObject);
-                        messages.add(messageObject);
-                        messagesById.put(messageObject.getId(), messageObject);
-
-                        if (PhotoViewer.getInstance().isVisible()) {
-                            PhotoViewer.getInstance().addPhoto(messageObject, photoViewerClassGuid);
+                        rawMessages.add(messageObjects.get(i));
+                    }
+                    if (rawMessages.size() > totalCount) {
+                        totalCount = rawMessages.size();
+                    }
+                    endReached = messageObjects.isEmpty() || rawMessages.size() >= totalCount;
+                    rebuildVisibleMessages();
+                    if (PhotoViewer.getInstance().isVisible()) {
+                        for (MessageObject messageObject : messages) {
+                            if (!previouslyVisibleMessages.contains(messageObject)) {
+                                PhotoViewer.getInstance().addPhoto(messageObject, photoViewerClassGuid);
+                            }
                         }
                     }
-                    if (messages.size() > totalCount) {
-                        totalCount = messages.size();
-                    }
-                    endReached = messages.size() >= totalCount;
 
                     if (messages.isEmpty()) {
                         if (currentSearchFilter != null) {
@@ -913,9 +1160,10 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                         });
                     }
                     adapter.notifyDataSetChanged();
+                    loadMoreForActiveFilterIfNeeded();
                 });
             });
-        }, (filterAndQueryIsSame && !messages.isEmpty()) ? 0 : 350);
+        }, (filterAndQueryIsSame && !rawMessages.isEmpty()) ? 0 : 350);
 
         if (currentSearchFilter == null) {
             loadingView.setViewType(FlickerLoadingView.DIALOG_TYPE);
@@ -965,31 +1213,26 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
 
     public void messagesDeleted(long channelId, ArrayList<Integer> markAsDeletedMessages) {
         boolean changed = false;
-        for (int j = 0; j < messages.size(); j++) {
-            MessageObject messageObject = messages.get(j);
+        for (int j = 0; j < rawMessages.size(); j++) {
+            MessageObject messageObject = rawMessages.get(j);
             long dialogId = messageObject.getDialogId();
             int currentChannelId = dialogId < 0 && ChatObject.isChannel((int) -dialogId, UserConfig.selectedAccount) ? (int) -dialogId : 0;
             if (currentChannelId == channelId) {
                 for (int i = 0; i < markAsDeletedMessages.size(); i++) {
                     if (messageObject.getId() == markAsDeletedMessages.get(i)) {
                         changed = true;
-                        messages.remove(j);
-                        messagesById.remove(messageObject.getId());
-
-                        ArrayList<MessageObject> section = sectionArrays.get(messageObject.monthKey);
-                        section.remove(messageObject);
-                        if (section.size() == 0) {
-                            sections.remove(messageObject.monthKey);
-                            sectionArrays.remove(messageObject.monthKey);
-                        }
+                        rawMessages.remove(j);
                         j--;
                         totalCount--;
                     }
                 }
             }
         }
-        if (changed && adapter != null) {
-            adapter.notifyDataSetChanged();
+        if (changed) {
+            rebuildVisibleMessages();
+            if (adapter != null) {
+                adapter.notifyDataSetChanged();
+            }
         }
     }
 

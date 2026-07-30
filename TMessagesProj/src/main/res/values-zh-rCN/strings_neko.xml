@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="MediaFilterTitle">媒体过滤</string>
+    <string name="MediaFilterHidePhotos">隐藏纯图片</string>
+    <string name="MediaFilterHideShortVideos">隐藏短视频</string>
+    <string name="MediaFilterMinutes">分</string>
+    <string name="MediaFilterSeconds">秒</string>
     <string name="NekoSettings">喵设置</string>
     <string name="PreferIPv6">优先通过 IPv6 连接</string>
     <string name="MessageMenu">消息菜单</string>
