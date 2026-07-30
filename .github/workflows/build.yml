@@ -5,15 +5,18 @@ on:
     branches: [ "main", "dev", "ci" ]
     paths-ignore:
       - '**.md'
-      - '.github/**'
-      - '!.github/workflows/build.yml'
   workflow_call:
   workflow_dispatch:
+
+concurrency:
+  group: build-and-release-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: blacksmith-32vcpu-ubuntu-2404
     permissions:
+      contents: write
       id-token: write
       attestations: write
       artifact-metadata: write
@@ -128,3 +131,65 @@ jobs:
         with:
           path: TMessagesProj_App/build/outputs/bundle/play/*-play.aab
           archive: false
+
+      - name: Determine release version
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        id: release_version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          base_version="$(sed -n 's/^APP_VERSION_NAME=//p' gradle.properties | tr -d '\r' | head -n 1)"
+          if [[ -z "${base_version}" ]]; then
+            echo "::error::APP_VERSION_NAME was not found in gradle.properties"
+            exit 1
+          fi
+
+          base_exists=false
+          max_suffix=-1
+          while IFS= read -r existing_tag; do
+            [[ -z "${existing_tag}" ]] && continue
+            if [[ "${existing_tag}" == "${base_version}" ]]; then
+              base_exists=true
+              if (( max_suffix < 0 )); then
+                max_suffix=0
+              fi
+            elif [[ "${existing_tag}" == "${base_version}."* ]]; then
+              suffix="${existing_tag#${base_version}.}"
+              if [[ "${suffix}" =~ ^[0-9]+$ ]] && (( 10#${suffix} > max_suffix )); then
+                max_suffix=$((10#${suffix}))
+              fi
+            fi
+          done < <(
+            gh api --paginate \
+              "/repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${base_version}" \
+              --jq '.[] | .ref | sub("^refs/tags/"; "")'
+          )
+
+          if [[ "${base_exists}" == false && ${max_suffix} -lt 0 ]]; then
+            release_tag="${base_version}"
+          else
+            release_tag="${base_version}.$((max_suffix + 1))"
+          fi
+
+          echo "base_version=${base_version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${release_tag}" >> "${GITHUB_OUTPUT}"
+          echo "Release tag: ${release_tag}"
+
+      - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release_version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "${RELEASE_TAG}" \
+            TMessagesProj_App/build/outputs/apk/release/*.apk \
+            TMessagesProj_App/build/outputs/bundle/play/*-play.aab \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "MediaGroupGram ${RELEASE_TAG}" \
+            --generate-notes
