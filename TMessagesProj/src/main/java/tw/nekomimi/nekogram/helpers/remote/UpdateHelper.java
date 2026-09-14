@@ -138,8 +138,9 @@ public class UpdateHelper extends BaseRemoteHelper {
     }
 
     public void checkNewVersionAvailable(Delegate delegate) {
-        load(delegate);
-        ConfigHelper.getInstance().load();
+        if (delegate != null) {
+            delegate.onTLResponse(null, null);
+        }
     }
 
     public static class Update {

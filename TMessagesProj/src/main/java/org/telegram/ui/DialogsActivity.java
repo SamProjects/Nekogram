@@ -93,7 +93,7 @@ import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.recyclerview.widget.ItemTouchHelper;
 import androidx.recyclerview.widget.LinearLayoutManager;
-import androidx.recyclerview.widget.LinearSmoothScrollerCustom;
+import org.telegram.ui.recyclerview.LinearSmoothScrollerCustom;
 import androidx.recyclerview.widget.RecyclerView;
 import androidx.viewpager.widget.ViewPager;
 
@@ -280,13 +280,14 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 import tw.nekomimi.nekogram.BackButtonMenuRecent;
+import tw.nekomimi.nekogram.folder.FolderIconHelper;
 import tw.nekomimi.nekogram.forward.ForwardContext;
 import tw.nekomimi.nekogram.NekoConfig;
 import tw.nekomimi.nekogram.forward.SendItemOptions;
+import tw.nekomimi.nekogram.helpers.AccountsHelper;
 import tw.nekomimi.nekogram.helpers.PasscodeHelper;
 import me.vkryl.android.animator.BoolAnimator;
 import me.vkryl.android.animator.FactorAnimator;
-import tw.nekomimi.nekogram.helpers.PopupHelper;
 import tw.nekomimi.nekogram.helpers.TypefaceHelper;
 import tw.nekomimi.nekogram.helpers.remote.ConfigHelper;
 import me.vkryl.android.util.ClickHelper;
@@ -5465,7 +5466,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         }
 
         actionBarDefaultPaint.setColor(getThemedColor(Theme.key_windowBackgroundWhite));
-        /*
+
         if (inPreviewMode) {
             final TLRPC.User currentUser = getUserConfig().getCurrentUser();
             avatarContainer = new ChatAvatarContainer(actionBar.getContext(), null, false, resourceProvider);
@@ -5485,7 +5486,6 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                 AndroidUtilities.removeFromParent(fragmentLocationContextViewWrapper);
             }
         }
-        */
 
         searchIsShowed = false;
 
@@ -5509,7 +5509,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
             View backButton = actionBar.getBackButton();
             backButton.setOnLongClickListener(e -> {
                 if (searching || filterTabsView != null && filterTabsView.isEditing() || actionBar.isActionModeShowed()) return false;
-                BackButtonMenuRecent.show(currentAccount, this, backButton, delegate);
+                BackButtonMenuRecent.show(this, backButton, false, delegate);
                 return true;
             });
         }
@@ -6881,12 +6881,17 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
             }
         }
         int index = filterTabsView.getTabsCount() - 1;
+        int tabIndex = 0;
         ArrayList<MessagesController.DialogFilter> filters = getMessagesController().getDialogFilters();
         for (int i = 0; i < filters.size(); ++i) {
+            if (NekoConfig.hideAllTab && filters.get(i).isDefault()) {
+                continue;
+            }
             if (filters.get(i).id == fid) {
-                index = i;
+                index = tabIndex;
                 break;
             }
+            tabIndex++;
         }
 
         FilterTabsView.Tab tab = filterTabsView.getTab(index);
@@ -6977,10 +6982,10 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                 filterTabsView.removeTabs();
                 for (int a = 0, N = filters.size(); a < N; a++) {
                     if (filters.get(a).isDefault()) {
-                        if (!NekoConfig.hideAllTab) filterTabsView.addTab(a, 0, LocaleController.getString(R.string.FilterAllChats), "\uD83D\uDCAC", null, false, true, filters.get(a).locked);
+                        if (!NekoConfig.hideAllTab) filterTabsView.addTab(a, 0, LocaleController.getString(R.string.FilterAllChats), FolderIconHelper.EMOTICON_ALL, null, false, true, filters.get(a).locked);
                     } else {
                         final MessagesController.DialogFilter filter = filters.get(a);
-                        filterTabsView.addTab(a, filter.localId, filter.name, filter.emoticon == null ? "\uD83D\uDCC1" : filter.emoticon, filter.entities, filter.title_noanimate, false, filters.get(a).locked);
+                        filterTabsView.addTab(a, filter.localId, filter.name, filter.emoticon == null ? FolderIconHelper.EMOTICON_CUSTOM : filter.emoticon, filter.entities, filter.title_noanimate, false, filters.get(a).locked);
                     }
                 }
                 if (NekoConfig.hideAllTab && stableId <= 0) {
@@ -8659,7 +8664,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                 title = Emoji.replaceEmoji(title, folderItem.getTextView().getPaint().getFontMetricsInt(), false);
                 title = MessageObject.replaceAnimatedEmoji(title, folder.entities, folderItem.getTextView().getPaint().getFontMetricsInt());
                 folderItem.setEmojiCacheType(folder.title_noanimate ? AnimatedEmojiDrawable.CACHE_TYPE_NOANIMATE_FOLDER : AnimatedEmojiDrawable.CACHE_TYPE_MESSAGES);
-                folderItem.setTextAndIcon(title, 0, new FolderDrawable(getContext(), R.drawable.msg_folders, folder.color));
+                folderItem.setTextAndIcon(title, 0, new FolderDrawable(getContext(), FolderIconHelper.getTabIcon(folder.emoticon), folder.color));
                 folderItem.getTextView().setEmojiColor(getThemedColor(Theme.key_featuredStickers_addButton));
                 folderItem.setMinimumWidth(160);
                 folderItem.setOnClickListener(e -> {
@@ -13831,6 +13836,14 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                 presentFragment(new ProfileActivity(args));
             });
         }
+        boolean hasArchive = NekoConfig.hideAllTab && getMessagesController().getDialogFilters().size() > 1 && getMessagesController().dialogs_dict.get(DialogObject.makeFolderDialogId(1)) != null;
+        if (hasArchive) {
+            io.add(R.drawable.msg_archive, getString(R.string.ArchivedChats), () -> {
+                Bundle args = new Bundle();
+                args.putInt("folderId", 1); // 1 is the ID of the archive folder.
+                presentFragment(new DialogsActivity(args));
+            });
+        }
         io.add(R.drawable.outline_groups_24, getString(R.string.NewGroup), () -> {
             Bundle args = new Bundle();
             presentFragment(new GroupCreateActivity(args));
@@ -13884,7 +13897,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
             });
         }
         if (NekoConfig.hideBottomNavigationBar) {
-            PopupHelper.fillAccountSelectorMenu(io, currentAccount, getParentActivity(), resourceProvider);
+            AccountsHelper.fillAccountSelectorMenu(io, currentAccount, getParentActivity(), resourceProvider, true);
         }
 
         if (proxyMenuSubItem != null) {

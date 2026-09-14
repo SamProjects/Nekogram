@@ -9,7 +9,6 @@
 package org.telegram.ui;
 
 import static org.telegram.messenger.AndroidUtilities.dp;
-import static org.telegram.messenger.AndroidUtilities.replaceSingleLinkBold;
 import static org.telegram.messenger.LocaleController.formatPluralString;
 import static org.telegram.messenger.LocaleController.formatString;
 import static org.telegram.ui.Components.Premium.LimitReachedBottomSheet.TYPE_BOOSTS_FOR_USERS;
@@ -24,6 +23,7 @@ import android.app.ActivityManager;
 import android.app.assist.AssistContent;
 import android.app.Dialog;
 import android.app.PictureInPictureParams;
+import android.app.PictureInPictureUiState;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -86,8 +86,6 @@ import androidx.core.content.pm.ShortcutManagerCompat;
 import androidx.core.graphics.ColorUtils;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
-import androidx.core.view.WindowCompat;
-import androidx.core.view.WindowInsetsCompat;
 
 import com.google.android.gms.common.api.Status;
 import com.google.common.primitives.Longs;
@@ -99,7 +97,6 @@ import org.telegram.messenger.AnimationNotificationsLocker;
 import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.AutoDeleteMediaTask;
 import org.telegram.messenger.BackupAgent;
-import org.telegram.messenger.BetaUpdate;
 import org.telegram.messenger.BirthdayController;
 import org.telegram.messenger.BotGuardHelper;
 import org.telegram.messenger.BotWebViewVibrationEffect;
@@ -176,7 +173,6 @@ import org.telegram.ui.Components.AppIconBulletinLayout;
 import org.telegram.ui.Components.AttachBotIntroTopView;
 import org.telegram.ui.Components.AudioPlayerAlert;
 import org.telegram.ui.Components.BatteryDrawable;
-import org.telegram.ui.Components.BlockingUpdateView;
 import org.telegram.ui.Components.Bulletin;
 import org.telegram.ui.Components.BulletinFactory;
 import org.telegram.ui.Components.CubicBezierInterpolator;
@@ -257,10 +253,10 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 import tw.nekomimi.nekogram.Extra;
+import tw.nekomimi.nekogram.FragmentPreviewWindow;
 import tw.nekomimi.nekogram.forward.ForwardContext;
 import tw.nekomimi.nekogram.NekoConfig;
 import tw.nekomimi.nekogram.helpers.MonetHelper;
-import tw.nekomimi.nekogram.helpers.remote.UpdateHelper;
 
 public class LaunchActivity extends BasePermissionsActivity implements INavigationLayout.INavigationLayoutDelegate, NotificationCenter.NotificationCenterDelegate, DialogsActivity.DialogsActivityDelegate, IPipActivity {
     public final static String EXTRA_FORCE_NOT_INTERNAL_APPS = "force_not_internal_apps";
@@ -316,10 +312,10 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     private FireworksOverlay fireworksOverlay;
     private BottomSheetTabsOverlay bottomSheetTabsOverlay;
     public DrawerLayoutContainer drawerLayoutContainer;
+    public FragmentPreviewWindow fragmentPreviewWindow;
     private PasscodeViewDialog passcodeDialog;
     private List<PasscodeView> overlayPasscodeViews = new ArrayList<>();
     private TermsOfServiceView termsOfServiceView;
-    private BlockingUpdateView blockingUpdateView;
     public final ArrayList<Dialog> visibleDialogs = new ArrayList<>();
     private Dialog proxyErrorDialog;
     private SelectAnimatedEmojiDialog.SelectAnimatedEmojiDialogWindow selectAnimatedEmojiDialog;
@@ -553,6 +549,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
             }
         });
         actionBarLayout.setDelegate(this);
+        fragmentPreviewWindow = new FragmentPreviewWindow(this, actionBarLayout);
         Theme.loadWallpaper(true);
 
         checkCurrentAccount();
@@ -1367,14 +1364,6 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
             rightActionBarLayout.getView().setVisibility(View.GONE);
             backgroundTablet.setVisibility(!actionBarLayout.getFragmentStack().isEmpty() ? View.GONE : View.VISIBLE);
         }
-    }
-
-    private void showUpdateActivity(int account, TLRPC.TL_help_appUpdate update, boolean check) {
-        if (blockingUpdateView == null) {
-            blockingUpdateView = new BlockingUpdateView(LaunchActivity.this);
-            drawerLayoutContainer.addView(blockingUpdateView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT));
-        }
-        blockingUpdateView.show(account, update, check);
     }
 
     private void showTosActivity(int account, TLRPC.TL_help_termsOfService tos) {
@@ -5950,72 +5939,10 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
         return foundContacts;
     }
 
-    private boolean firstAppUpdateCheck = true;
     public void checkAppUpdate(boolean force, Browser.Progress progress) {
-        if (!force && !BuildVars.CHECK_UPDATES) {
-            return;
-        }
-        if (ApplicationLoader.applicationLoaderInstance.isCustomUpdate()) {
-            final BetaUpdate prevUpdate = ApplicationLoader.applicationLoaderInstance.getUpdate();
-            final boolean first = firstAppUpdateCheck;
-            firstAppUpdateCheck = false;
-            ApplicationLoader.applicationLoaderInstance.checkUpdate(force, () -> {
-                final BetaUpdate pendingUpdate = ApplicationLoader.applicationLoaderInstance.getUpdate();
-                if (progress != null) {
-                    progress.end();
-                    if (pendingUpdate == null) {
-                        BaseFragment fragment = getLastFragment();
-                        if (fragment != null) {
-                            BulletinFactory.of(fragment).createSimpleBulletin(R.raw.chats_infotip, LocaleController.getString(R.string.YourVersionIsLatest)).show();
-                        }
-                    }
-                }
-                if (pendingUpdate != null && !ApplicationLoader.applicationLoaderInstance.isDownloadingUpdate() && (first || prevUpdate == null || pendingUpdate.higherThan(prevUpdate))) {
-                    ApplicationLoader.applicationLoaderInstance.showCustomUpdateAppPopup(LaunchActivity.this, pendingUpdate, currentAccount);
-                }
-            });
-            return;
-        }
-        if (!force && Math.abs(System.currentTimeMillis() - SharedConfig.lastUpdateCheckTime) < MessagesController.getInstance(0).updateCheckDelay * 1000) {
-            return;
-        }
-        final int accountNum = currentAccount;
-        UpdateHelper.getInstance().checkNewVersionAvailable((res, error) -> {
-            SharedConfig.lastUpdateCheckTime = System.currentTimeMillis();
-            SharedConfig.saveConfig();
-            AndroidUtilities.runOnUIThread(() -> {
-                if (res != null) {
-                    SharedConfig.setNewAppVersionAvailable(res);
-                    if (res.can_not_skip) {
-                        showUpdateActivity(accountNum, res, false);
-                    } else {
-                        ApplicationLoader.applicationLoaderInstance.showUpdateAppPopup(LaunchActivity.this, res, accountNum);
-                    }
-                } else {
-                    if (force) {
-                        BaseFragment fragment = getLastFragment();
-                        if (fragment != null) {
-                            if (error == null) {
-                                if (Extra.isDirectApp()) {
-                                    BulletinFactory.of(fragment).createSimpleBulletin(R.raw.chats_infotip, LocaleController.getString(R.string.YourVersionIsLatest)).show();
-                                } else {
-                                    showBulletin(factory -> factory.createSimpleBulletin(R.raw.chats_infotip, LocaleController.getString(R.string.NoUpdateAvailablePlay), LocaleController.getString(R.string.NoUpdateAvailablePlayDelay)));
-                                }
-                            } else {
-                                AlertsCreator.createSimpleAlert(this, LocaleController.getString(R.string.ErrorOccurred) + "\n" + error).show();
-                            }
-                        }
-                    }
-                    SharedConfig.setNewAppVersionAvailable(null);
-                }
-                NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.appUpdateAvailable);
-                if (progress != null) {
-                    progress.end();
-                }
-            });
-        });
         if (progress != null) {
             progress.init();
+            AndroidUtilities.runOnUIThread(progress::end);
         }
     }
 
@@ -6368,7 +6295,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                             }
                             ArrayList<String> arrayList = new ArrayList<>();
                             arrayList.add(videoPath);
-                            SendMessagesHelper.prepareSendingDocuments(accountInstance, arrayList, arrayList, null, captionToSend, null, did, replyToMsg, replyToMsg, null, null, null, notify, scheduleDate, null, null, 0, 0, false, 0);
+                            SendMessagesHelper.prepareSendingDocuments(accountInstance, arrayList, arrayList, null, captionToSend, null, did, replyToMsg, replyToMsg, null, null, null, notify, scheduleDate, null, null, 0, false, 0);
                         } else if (photoPathsArray != null && photoPathsArray.size() > 0 && !photosEditorOpened) {
                             if (sendingText != null && sendingText.length() <= 1024 && photoPathsArray.size() == 1) {
                                 CharSequence[] m = new CharSequence[] { sendingText };
@@ -6376,7 +6303,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                                 photoPathsArray.get(0).caption = m[0].toString();
                                 sendingText = null;
                             }
-                            SendMessagesHelper.prepareSendingMedia(accountInstance, photoPathsArray, did, replyToMsg, replyToMsg, null, null, false, photoPathsArray.size() > 1, null, notify, scheduleDate, scheduleRepeatPeriod, 0, false, null, null, 0, 0, false, 0, 0, null);
+                            SendMessagesHelper.prepareSendingMedia(accountInstance, photoPathsArray, did, replyToMsg, replyToMsg, null, null, false, photoPathsArray.size() > 1, null, notify, scheduleDate, scheduleRepeatPeriod, 0, false, null, null, 0, false, 0, 0, null);
                         }
                     } else {
                         if (videoPath != null) {
@@ -6386,7 +6313,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                             }
                             ArrayList<String> arrayList = new ArrayList<>();
                             arrayList.add(videoPath);
-                            SendMessagesHelper.prepareSendingDocuments(accountInstance, arrayList, arrayList, null, captionToSend, null, did, replyToMsg, replyToMsg, null, null, null, notify, scheduleDate, null, null, 0, 0, false, 0);
+                            SendMessagesHelper.prepareSendingDocuments(accountInstance, arrayList, arrayList, null, captionToSend, null, did, replyToMsg, replyToMsg, null, null, null, notify, scheduleDate, null, null, 0, false, 0);
                         }
                         if (photoPathsArray != null && !photosEditorOpened) {
                             if (sendingText != null && sendingText.length() <= 1024 && photoPathsArray.size() == 1) {
@@ -6395,7 +6322,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                                 photoPathsArray.get(0).caption = m[0].toString();
                                 sendingText = null;
                             }
-                            SendMessagesHelper.prepareSendingMedia(accountInstance, photoPathsArray, did, replyToMsg, replyToMsg, null, null, false, photoPathsArray.size() > 1, null, notify, scheduleDate, scheduleRepeatPeriod, 0, false, null, null, 0, 0, false, 0, 0, null);
+                            SendMessagesHelper.prepareSendingMedia(accountInstance, photoPathsArray, did, replyToMsg, replyToMsg, null, null, false, photoPathsArray.size() > 1, null, notify, scheduleDate, scheduleRepeatPeriod, 0, false, null, null, 0, false, 0, 0, null);
                         }
                     }
                     if (documentsPathsArray != null || documentsUrisArray != null) {
@@ -6403,7 +6330,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                             captionToSend = sendingText;
                             sendingText = null;
                         }
-                        SendMessagesHelper.prepareSendingDocuments(accountInstance, documentsPathsArray, documentsOriginalPathsArray, documentsUrisArray, captionToSend, documentsMimeType, did, replyToMsg, replyToMsg, null, null, null, notify, scheduleDate, null, null, 0, 0, false, 0);
+                        SendMessagesHelper.prepareSendingDocuments(accountInstance, documentsPathsArray, documentsOriginalPathsArray, documentsUrisArray, captionToSend, documentsMimeType, did, replyToMsg, replyToMsg, null, null, null, notify, scheduleDate, null, null, 0, false, 0);
                     }
                     if (voicePath != null) {
                         File file = new File(voicePath);
@@ -6785,6 +6712,12 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
         pipActivityHandler.setPictureInPictureParams(params);
     }
 
+    @Override
+    public void onPictureInPictureUiStateChanged(@NonNull PictureInPictureUiState pipState) {
+        super.onPictureInPictureUiStateChanged(pipState);
+        pipActivityHandler.onPictureInPictureUiStateChanged(pipState);
+    }
+
     @RequiresApi(api = Build.VERSION_CODES.O)
     @Override
     public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode, @NonNull Configuration newConfig) {
@@ -6995,10 +6928,10 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
         }
         if (UserConfig.getInstance(UserConfig.selectedAccount).unacceptedTermsOfService != null) {
             showTosActivity(UserConfig.selectedAccount, UserConfig.getInstance(UserConfig.selectedAccount).unacceptedTermsOfService);
-        } else if (SharedConfig.pendingAppUpdate != null && SharedConfig.pendingAppUpdate.can_not_skip) {
-            showUpdateActivity(UserConfig.selectedAccount, SharedConfig.pendingAppUpdate, true);
         }
-        checkAppUpdate(false, null);
+        if (SharedConfig.pendingAppUpdate != null) {
+            SharedConfig.setNewAppVersionAvailable(null);
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             ApplicationLoader.canDrawOverlays = Settings.canDrawOverlays(this);
@@ -7169,8 +7102,8 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
             builder.setTitle(LocaleController.getString(R.string.AppName));
             if (fragment != null) {
                 Map<String, Integer> colorsReplacement = new HashMap<>();
-                colorsReplacement.put("info1.**", fragment.getThemedColor(Theme.key_dialogTopBackground));
-                colorsReplacement.put("info2.**", fragment.getThemedColor(Theme.key_dialogTopBackground));
+                colorsReplacement.put("info1", fragment.getThemedColor(Theme.key_dialogTopBackground));
+                colorsReplacement.put("info2", fragment.getThemedColor(Theme.key_dialogTopBackground));
                 builder.setTopAnimation(R.raw.not_available, AlertsCreator.NEW_DENY_DIALOG_TOP_ICON_SIZE, false, fragment.getThemedColor(Theme.key_dialogTopBackground), colorsReplacement);
                 builder.setTopAnimationIsNew(true);
             }
@@ -9138,7 +9071,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
             reasonsToHideDecorView += (increment ? 1 : -1);
         }
         if (frameLayout != null) {
-            frameLayout.setVisibility(reasonsToHideMainContent > 0 ? View.GONE : View.VISIBLE);
+            frameLayout.setVisibility(reasonsToHideMainContent > 0 ? View.INVISIBLE : View.VISIBLE);
         }
         checkDecorViewVisibility();
     }
