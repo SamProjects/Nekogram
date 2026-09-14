@@ -143,11 +143,13 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     private int requestIndex;
     private boolean hidePhotoOnlyMedia;
     private boolean hideShortVideos;
+    private boolean hideManagedChats;
     private int shortVideoThresholdSeconds = 60;
 
     private static final String MEDIA_FILTER_PREFERENCES = "media_group_filter";
     private static final String PREF_HIDE_PHOTOS = "hide_photo_only";
     private static final String PREF_HIDE_SHORT_VIDEOS = "hide_short_videos";
+    private static final String PREF_HIDE_MANAGED_CHATS = "hide_managed_chats";
     private static final String PREF_SHORT_VIDEO_SECONDS = "short_video_seconds";
 
     private String currentDataQuery;
@@ -315,6 +317,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences(MEDIA_FILTER_PREFERENCES, Context.MODE_PRIVATE);
         hidePhotoOnlyMedia = preferences.getBoolean(PREF_HIDE_PHOTOS, false);
         hideShortVideos = preferences.getBoolean(PREF_HIDE_SHORT_VIDEOS, false);
+        hideManagedChats = preferences.getBoolean(PREF_HIDE_MANAGED_CHATS, false);
         shortVideoThresholdSeconds = Math.max(0, preferences.getInt(PREF_SHORT_VIDEO_SECONDS, 60));
         setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
         recyclerListView = new RecyclerListView(context) {
@@ -526,15 +529,21 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         });
         updateDurationEnabled.run();
 
+        TextCheckCell managedChatsCell = new TextCheckCell(context, 21, true);
+        managedChatsCell.setTextAndCheck(getString(R.string.MediaFilterHideManagedChats), hideManagedChats, false);
+        managedChatsCell.setBackground(Theme.getSelectorDrawable(false));
+        managedChatsCell.setOnClickListener(v -> managedChatsCell.setChecked(!managedChatsCell.isChecked()));
+        container.addView(managedChatsCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 50));
+
         AlertDialog.Builder builder = new AlertDialog.Builder(context, parentFragment.getResourceProvider());
         builder.setTitle(getString(R.string.MediaFilterTitle));
         builder.setView(container);
         builder.setNegativeButton(getString(R.string.Cancel), null);
-        builder.setNeutralButton(getString(R.string.Reset), (dialog, which) -> applyMediaFilter(false, false, 60));
+        builder.setNeutralButton(getString(R.string.Reset), (dialog, which) -> applyMediaFilter(false, false, false, 60));
         builder.setPositiveButton(getString(R.string.ApplyTheme), (dialog, which) -> {
             int minutes = parseDurationValue(minutesInput, 0, 999);
             int seconds = parseDurationValue(secondsInput, 0, 59);
-            applyMediaFilter(photoCell.isChecked(), durationCell.isChecked(), minutes * 60 + seconds);
+            applyMediaFilter(photoCell.isChecked(), durationCell.isChecked(), managedChatsCell.isChecked(), minutes * 60 + seconds);
         });
         parentFragment.showDialog(builder.create());
     }
@@ -569,14 +578,16 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         }
     }
 
-    private void applyMediaFilter(boolean hidePhotos, boolean hideShort, int thresholdSeconds) {
+    private void applyMediaFilter(boolean hidePhotos, boolean hideShort, boolean hideManaged, int thresholdSeconds) {
         hidePhotoOnlyMedia = hidePhotos;
         hideShortVideos = hideShort;
+        hideManagedChats = hideManaged;
         shortVideoThresholdSeconds = Math.max(0, thresholdSeconds);
         ApplicationLoader.applicationContext.getSharedPreferences(MEDIA_FILTER_PREFERENCES, Context.MODE_PRIVATE)
                 .edit()
                 .putBoolean(PREF_HIDE_PHOTOS, hidePhotoOnlyMedia)
                 .putBoolean(PREF_HIDE_SHORT_VIDEOS, hideShortVideos)
+                .putBoolean(PREF_HIDE_MANAGED_CHATS, hideManagedChats)
                 .putInt(PREF_SHORT_VIDEO_SECONDS, shortVideoThresholdSeconds)
                 .apply();
         rebuildVisibleMessages();
@@ -590,7 +601,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     private boolean isCustomMediaFilterActive() {
         return currentSearchFilter != null
                 && currentSearchFilter.filterType == FiltersView.FILTER_TYPE_MEDIA
-                && (hidePhotoOnlyMedia || hideShortVideos);
+                && (hidePhotoOnlyMedia || hideShortVideos || hideManagedChats);
     }
 
     private void rebuildVisibleMessages() {
@@ -663,6 +674,9 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     }
 
     private boolean shouldShowStandaloneMedia(MessageObject messageObject) {
+        if (hideManagedChats && isManagedChat(messageObject)) {
+            return false;
+        }
         if (hidePhotoOnlyMedia && messageObject.isPhoto()) {
             return false;
         }
@@ -670,6 +684,9 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     }
 
     private boolean shouldShowMediaGroup(ArrayList<MessageObject> group) {
+        if (hideManagedChats && !group.isEmpty() && isManagedChat(group.get(0))) {
+            return false;
+        }
         boolean hasVideo = false;
         boolean allItemsArePhotos = true;
         boolean allVideosAreShort = true;
@@ -688,6 +705,18 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             return false;
         }
         return !hideShortVideos || !hasVideo || !allVideosAreShort;
+    }
+
+    private boolean isManagedChat(MessageObject messageObject) {
+        if (messageObject == null) {
+            return false;
+        }
+        long dialogId = messageObject.getDialogId();
+        if (dialogId >= 0) {
+            return false;
+        }
+        TLRPC.Chat chat = MessagesController.getInstance(messageObject.currentAccount).getChat(-dialogId);
+        return ChatObject.hasAdminRights(chat);
     }
 
     private boolean isShortVideo(MessageObject messageObject) {

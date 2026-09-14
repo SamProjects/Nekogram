@@ -3,6 +3,7 @@
     <string name="MediaFilterTitle">媒体过滤</string>
     <string name="MediaFilterHidePhotos">隐藏纯图片</string>
     <string name="MediaFilterHideShortVideos">隐藏短视频</string>
+    <string name="MediaFilterHideManagedChats">隐藏我管理的群/频道</string>
     <string name="MediaFilterMinutes">分</string>
     <string name="MediaFilterSeconds">秒</string>
     <string name="NekoSettings">喵设置</string>

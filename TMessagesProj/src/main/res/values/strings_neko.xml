@@ -6,6 +6,7 @@
     <string name="MediaFilterTitle">Media filter</string>
     <string name="MediaFilterHidePhotos">Hide photo-only media</string>
     <string name="MediaFilterHideShortVideos">Hide short videos</string>
+    <string name="MediaFilterHideManagedChats">Hide groups/channels I manage</string>
     <string name="MediaFilterMinutes">min</string>
     <string name="MediaFilterSeconds">sec</string>
     <string name="NekoSettings">Neko Settings</string>
