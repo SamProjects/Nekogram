@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          submodules: true
+          submodules: 'recursive'
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -47,7 +47,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
-          packages: "build-tools;37.0.0 ndk;27.3.13750724 platforms;android-37.0"
+          packages: "build-tools;37.0.0 ndk;27.3.13750724 platforms;android-37.0 cmake;3.22.1"
 
       - name: Configure Gradle
         run: |

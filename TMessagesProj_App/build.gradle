@@ -2,6 +2,7 @@ import com.android.build.api.variant.FilterConfiguration
 
 plugins {
     id 'com.android.application'
+    id 'org.telegram.build-app-plugin'
     id 'io.sentry.android.gradle'
 }
 
@@ -31,6 +32,10 @@ android {
     Properties localProperties = new Properties()
     if (project.rootProject.file('local.properties').exists()) {
         localProperties.load(project.rootProject.file('local.properties').newDataInputStream())
+    }
+
+    androidResources {
+        noCompress += "pack"
     }
 
     signingConfigs {
