@@ -50,6 +50,7 @@ import org.telegram.messenger.FileLog;
 import org.telegram.messenger.ImageReceiver;
 import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.MediaController;
+import org.telegram.messenger.MediaDataController;
 import org.telegram.messenger.MessageObject;
 import org.telegram.messenger.MessagesController;
 import org.telegram.messenger.MessagesStorage;
@@ -145,9 +146,20 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     private int requestIndex;
     private static final int GLOBAL_MEDIA_PAGE_SIZE = 100;
     private static final long GLOBAL_MEDIA_REQUEST_INTERVAL_MS = 1000;
+    private static final long GLOBAL_MEDIA_CACHE_FRESHNESS_MS = 5 * 60 * 1000L;
+    private static final String GLOBAL_MEDIA_CACHE_PREFERENCES = "global_media_search_cache";
     private ArrayList<GlobalMediaDialogSearch> globalMediaDialogSearches;
     private ArrayList<GlobalMediaDialogSearch> globalMediaDialogBatch;
+    private final HashSet<Long> globalMediaDialogIds = new HashSet<>();
     private final ArrayList<Integer> globalMediaRequestIds = new ArrayList<>();
+    private final HashSet<MessageHashId> globalMediaMessageIds = new HashSet<>();
+    private ArrayList<GlobalMediaDialogSearch> globalMediaCacheBatch;
+    private GlobalMediaDialogSearch globalMediaCacheLoadingDialog;
+    private int globalMediaCacheBatchCursor;
+    private int globalMediaCacheRequestToken;
+    private int globalMediaCacheObserverAccount = -1;
+    private boolean globalMediaCacheObserverRegistered;
+    private boolean globalMediaCacheRequestInFlight;
     private Runnable globalMediaDispatchRunnable;
     private int globalMediaSearchGeneration = -1;
     private int globalMediaSearchAccount;
@@ -194,6 +206,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             if (isLoading) {
                 messages.clear();
                 rawMessages.clear();
+                globalMediaMessageIds.clear();
                 sections.clear();
                 sectionArrays.clear();
                 if (adapter != null) {
@@ -648,6 +661,12 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                     if ((!dialogSearch.endReached || dialogSearch.failed) && dialogSearch.pendingGroupKey != null) {
                         pendingGroupKeys.add(dialogSearch.pendingGroupKey);
                     }
+                    if (!dialogSearch.historyEndReached && dialogSearch.historyPendingGroupKey != null) {
+                        pendingGroupKeys.add(dialogSearch.historyPendingGroupKey);
+                    }
+                    if (!dialogSearch.cacheLoaded && dialogSearch.cachePendingGroupKey != null) {
+                        pendingGroupKeys.add(dialogSearch.cachePendingGroupKey);
+                    }
                 }
             } else if (!endReached && !rawMessages.isEmpty()) {
                 String pendingGroupKey = getMediaGroupKey(rawMessages.get(rawMessages.size() - 1));
@@ -769,12 +788,26 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     private static class GlobalMediaDialogSearch {
         final long dialogId;
         final TLRPC.InputPeer peer;
+        String cacheStateKey;
         int offsetId;
         int count;
         int failedAttempts;
+        int headBoundaryId;
+        int catchupOffsetId;
+        int catchupBoundaryId;
+        int pendingHeadBoundaryId;
+        int cacheOffsetId;
+        int cacheTargetOffsetId;
+        long lastHeadSyncAt;
+        boolean historyEndReached;
+        boolean catchingUp;
+        boolean hasSavedState;
+        boolean cacheLoaded;
         boolean endReached;
         boolean failed;
         String pendingGroupKey;
+        String historyPendingGroupKey;
+        String cachePendingGroupKey;
 
         GlobalMediaDialogSearch(long dialogId, TLRPC.InputPeer peer) {
             this.dialogId = dialogId;
@@ -782,7 +815,232 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         }
     }
 
+    private String getGlobalMediaCacheStateKey(long dialogId) {
+        long userId = UserConfig.getInstance(globalMediaSearchAccount).getClientUserId();
+        return "a" + globalMediaSearchAccount
+                + "_u" + userId
+                + "_f" + globalMediaSearchFolder
+                + "_min" + currentSearchMinDate
+                + "_max" + currentSearchMaxDate
+                + "_d" + dialogId + "_";
+    }
+
+    private SharedPreferences getGlobalMediaCachePreferences() {
+        return ApplicationLoader.applicationContext.getSharedPreferences(GLOBAL_MEDIA_CACHE_PREFERENCES, Activity.MODE_PRIVATE);
+    }
+
+    private void loadGlobalMediaCacheState(GlobalMediaDialogSearch dialogSearch) {
+        SharedPreferences preferences = getGlobalMediaCachePreferences();
+        String key = dialogSearch.cacheStateKey = getGlobalMediaCacheStateKey(dialogSearch.dialogId);
+        dialogSearch.hasSavedState = preferences.getBoolean(key + "initialized", false);
+        if (dialogSearch.hasSavedState) {
+            dialogSearch.offsetId = preferences.getInt(key + "history_offset", 0);
+            dialogSearch.historyEndReached = preferences.getBoolean(key + "history_end", false);
+            dialogSearch.headBoundaryId = preferences.getInt(key + "head_boundary", 0);
+            dialogSearch.lastHeadSyncAt = preferences.getLong(key + "head_updated", 0);
+            dialogSearch.count = preferences.getInt(key + "count", 0);
+            dialogSearch.catchingUp = preferences.getBoolean(key + "catching_up", false);
+            dialogSearch.catchupOffsetId = preferences.getInt(key + "catchup_offset", 0);
+            dialogSearch.catchupBoundaryId = preferences.getInt(key + "catchup_boundary", 0);
+            dialogSearch.pendingHeadBoundaryId = preferences.getInt(key + "pending_head_boundary", 0);
+            dialogSearch.historyPendingGroupKey = preferences.getString(key + "history_pending_group", null);
+
+            long now = System.currentTimeMillis();
+            boolean stale = dialogSearch.lastHeadSyncAt <= 0 || now < dialogSearch.lastHeadSyncAt
+                    || now - dialogSearch.lastHeadSyncAt >= GLOBAL_MEDIA_CACHE_FRESHNESS_MS;
+            if (!dialogSearch.catchingUp && stale) {
+                dialogSearch.catchingUp = true;
+                dialogSearch.catchupOffsetId = 0;
+                dialogSearch.catchupBoundaryId = dialogSearch.headBoundaryId;
+                dialogSearch.pendingHeadBoundaryId = 0;
+            }
+        } else {
+            dialogSearch.catchingUp = true;
+            dialogSearch.catchupOffsetId = 0;
+            dialogSearch.catchupBoundaryId = 0;
+            dialogSearch.pendingHeadBoundaryId = 0;
+        }
+        dialogSearch.cacheTargetOffsetId = dialogSearch.offsetId;
+        dialogSearch.cacheOffsetId = 0;
+        dialogSearch.cacheLoaded = false;
+        dialogSearch.endReached = !dialogSearch.catchingUp && dialogSearch.historyEndReached;
+        if (dialogSearch.catchingUp) {
+            saveGlobalMediaCacheState(dialogSearch);
+        }
+    }
+
+    private void saveGlobalMediaCacheState(GlobalMediaDialogSearch dialogSearch) {
+        writeGlobalMediaCacheState(
+                dialogSearch.cacheStateKey,
+                dialogSearch.offsetId,
+                dialogSearch.historyEndReached,
+                dialogSearch.headBoundaryId,
+                dialogSearch.lastHeadSyncAt,
+                dialogSearch.count,
+                dialogSearch.catchingUp,
+                dialogSearch.catchupOffsetId,
+                dialogSearch.catchupBoundaryId,
+                dialogSearch.pendingHeadBoundaryId,
+                dialogSearch.historyPendingGroupKey
+        );
+        dialogSearch.hasSavedState = true;
+    }
+
+    private void saveGlobalMediaCacheStateAfterMessagesStored(GlobalMediaDialogSearch dialogSearch) {
+        final String key = dialogSearch.cacheStateKey;
+        final int offsetId = dialogSearch.offsetId;
+        final boolean historyEndReached = dialogSearch.historyEndReached;
+        final int headBoundaryId = dialogSearch.headBoundaryId;
+        final long lastHeadSyncAt = dialogSearch.lastHeadSyncAt;
+        final int count = dialogSearch.count;
+        final boolean catchingUp = dialogSearch.catchingUp;
+        final int catchupOffsetId = dialogSearch.catchupOffsetId;
+        final int catchupBoundaryId = dialogSearch.catchupBoundaryId;
+        final int pendingHeadBoundaryId = dialogSearch.pendingHeadBoundaryId;
+        final String historyPendingGroupKey = dialogSearch.historyPendingGroupKey;
+        MessagesStorage.getInstance(globalMediaSearchAccount).getStorageQueue().postRunnable(() -> writeGlobalMediaCacheState(
+                key, offsetId, historyEndReached, headBoundaryId, lastHeadSyncAt, count, catchingUp,
+                catchupOffsetId, catchupBoundaryId, pendingHeadBoundaryId, historyPendingGroupKey));
+        dialogSearch.hasSavedState = true;
+    }
+
+    private void writeGlobalMediaCacheState(String key, int offsetId, boolean historyEndReached, int headBoundaryId,
+            long lastHeadSyncAt, int count, boolean catchingUp, int catchupOffsetId, int catchupBoundaryId,
+            int pendingHeadBoundaryId, String historyPendingGroupKey) {
+        SharedPreferences.Editor editor = getGlobalMediaCachePreferences().edit();
+        editor.putBoolean(key + "initialized", true)
+                .putInt(key + "history_offset", offsetId)
+                .putBoolean(key + "history_end", historyEndReached)
+                .putInt(key + "head_boundary", headBoundaryId)
+                .putLong(key + "head_updated", lastHeadSyncAt)
+                .putInt(key + "count", count)
+                .putBoolean(key + "catching_up", catchingUp)
+                .putInt(key + "catchup_offset", catchupOffsetId)
+                .putInt(key + "catchup_boundary", catchupBoundaryId)
+                .putInt(key + "pending_head_boundary", pendingHeadBoundaryId)
+                .putString(key + "history_pending_group", historyPendingGroupKey)
+                .apply();
+    }
+
+    private void setGlobalMediaCacheObserverAccount(int account) {
+        if (globalMediaCacheObserverRegistered
+                && (globalMediaCacheObserverAccount != account || account < 0)) {
+            NotificationCenter.getInstance(globalMediaCacheObserverAccount).removeObserver(this, NotificationCenter.mediaDidLoad);
+            globalMediaCacheObserverRegistered = false;
+        }
+        globalMediaCacheObserverAccount = account;
+        if (globalMediaCacheObserverAccount >= 0 && isAttachedToWindow() && !globalMediaCacheObserverRegistered) {
+            NotificationCenter.getInstance(globalMediaCacheObserverAccount).addObserver(this, NotificationCenter.mediaDidLoad);
+            globalMediaCacheObserverRegistered = true;
+        }
+    }
+
+    private boolean isInCurrentGlobalMediaDateRange(MessageObject messageObject) {
+        long date = messageObject.messageOwner.date * 1000L;
+        return (currentSearchMinDate <= 0 || date >= currentSearchMinDate)
+                && (currentSearchMaxDate <= 0 || date <= currentSearchMaxDate);
+    }
+
+    private boolean addGlobalMediaMessage(MessageObject messageObject) {
+        if (messageObject == null || !isInCurrentGlobalMediaDateRange(messageObject)) {
+            return false;
+        }
+        MessageHashId key = new MessageHashId(messageObject.getId(), messageObject.getDialogId());
+        if (!globalMediaMessageIds.add(key)) {
+            return false;
+        }
+        messageObject.setQuery("");
+        rawMessages.add(messageObject);
+        return true;
+    }
+
+    private void startGlobalMediaCacheLoadRound() {
+        if (!isAttachedToWindow() || globalMediaSearchGeneration == -1 || globalMediaDialogSearches == null
+                || globalMediaCacheRequestInFlight || globalMediaCacheBatch != null) {
+            return;
+        }
+        globalMediaCacheBatch = new ArrayList<>();
+        for (GlobalMediaDialogSearch dialogSearch : globalMediaDialogSearches) {
+            if (!dialogSearch.cacheLoaded) {
+                globalMediaCacheBatch.add(dialogSearch);
+            }
+        }
+        globalMediaCacheBatchCursor = 0;
+        if (globalMediaCacheBatch.isEmpty()) {
+            globalMediaCacheBatch = null;
+            return;
+        }
+        dispatchGlobalMediaCacheLoad();
+    }
+
+    private void dispatchGlobalMediaCacheLoad() {
+        if (!isAttachedToWindow() || globalMediaSearchGeneration == -1 || globalMediaCacheBatch == null
+                || globalMediaCacheRequestInFlight || globalMediaCacheBatchCursor >= globalMediaCacheBatch.size()) {
+            return;
+        }
+        globalMediaCacheLoadingDialog = globalMediaCacheBatch.get(globalMediaCacheBatchCursor);
+        globalMediaCacheRequestInFlight = true;
+        MediaDataController.getInstance(globalMediaSearchAccount).loadMediaFromCacheNoHoles(
+                globalMediaCacheLoadingDialog.dialogId,
+                GLOBAL_MEDIA_PAGE_SIZE,
+                globalMediaCacheLoadingDialog.cacheOffsetId,
+                MediaDataController.MEDIA_PHOTOVIDEO,
+                currentSearchMinDate > 0 ? (int) (currentSearchMinDate / 1000) : 0,
+                currentSearchMaxDate > 0 ? (int) (currentSearchMaxDate / 1000) : 0,
+                parentFragment.getClassGuid(),
+                globalMediaCacheRequestToken
+        );
+    }
+
+    private void onGlobalMediaCacheLoaded(Object... args) {
+        if (args.length < 8 || !globalMediaCacheRequestInFlight || globalMediaCacheLoadingDialog == null
+                || globalMediaDialogSearches == null || globalMediaSearchGeneration == -1
+                || (Integer) args[3] != parentFragment.getClassGuid()
+                || (Integer) args[4] != MediaDataController.MEDIA_PHOTOVIDEO
+                || (Integer) args[7] != globalMediaCacheRequestToken
+                || (Long) args[0] != globalMediaCacheLoadingDialog.dialogId) {
+            return;
+        }
+
+        GlobalMediaDialogSearch dialogSearch = globalMediaCacheLoadingDialog;
+        globalMediaCacheRequestInFlight = false;
+        globalMediaCacheLoadingDialog = null;
+        ArrayList<MessageObject> cachedMessages = (ArrayList<MessageObject>) args[2];
+        boolean changed = false;
+        int oldestMessageId = 0;
+        MessageObject oldestMessageObject = null;
+        if (cachedMessages != null) {
+            for (MessageObject messageObject : cachedMessages) {
+                changed |= addGlobalMediaMessage(messageObject);
+                oldestMessageId = messageObject.getId();
+                oldestMessageObject = messageObject;
+            }
+        }
+
+        boolean reachedTarget = dialogSearch.cacheTargetOffsetId <= 0 || oldestMessageId <= dialogSearch.cacheTargetOffsetId;
+        boolean topReached = (Boolean) args[5];
+        if (cachedMessages == null || cachedMessages.size() < GLOBAL_MEDIA_PAGE_SIZE || oldestMessageId <= 0 || reachedTarget || topReached) {
+            dialogSearch.cacheLoaded = true;
+            dialogSearch.cachePendingGroupKey = null;
+        } else {
+            dialogSearch.cacheOffsetId = oldestMessageId;
+            dialogSearch.cachePendingGroupKey = oldestMessageObject != null ? getMediaGroupKey(oldestMessageObject) : null;
+        }
+
+        if (changed) {
+            updateGlobalMediaResults(globalMediaSearchGeneration);
+        }
+        globalMediaCacheBatchCursor++;
+        if (globalMediaCacheBatchCursor >= globalMediaCacheBatch.size()) {
+            globalMediaCacheBatch = null;
+            startGlobalMediaCacheLoadRound();
+        } else {
+            dispatchGlobalMediaCacheLoad();
+        }
+    }
+
     private void resetGlobalMediaDialogSearch() {
+        setGlobalMediaCacheObserverAccount(-1);
         if (globalMediaDispatchRunnable != null) {
             AndroidUtilities.cancelRunOnUIThread(globalMediaDispatchRunnable);
             globalMediaDispatchRunnable = null;
@@ -791,8 +1049,15 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             ConnectionsManager.getInstance(globalMediaSearchAccount).cancelRequest(globalMediaRequestIds.get(i), true);
         }
         globalMediaRequestIds.clear();
+        globalMediaCacheRequestToken++;
+        globalMediaCacheBatch = null;
+        globalMediaCacheLoadingDialog = null;
+        globalMediaCacheBatchCursor = 0;
+        globalMediaCacheRequestInFlight = false;
         globalMediaDialogSearches = null;
         globalMediaDialogBatch = null;
+        globalMediaDialogIds.clear();
+        globalMediaMessageIds.clear();
         globalMediaSearchGeneration = -1;
         globalMediaBatchCursor = 0;
         globalMediaBatchCompleted = 0;
@@ -811,16 +1076,12 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         if (generation != requestIndex || generation != globalMediaSearchGeneration) {
             return;
         }
-        if (globalMediaDialogSearches != null) {
-            if (globalMediaDialogBatch == null) {
-                startGlobalMediaDialogBatch(generation);
-            }
-            return;
-        }
-
         MessagesController messagesController = MessagesController.getInstance(globalMediaSearchAccount);
         if (!messagesController.isServerDialogsEndReached(globalMediaSearchFolder)) {
             globalMediaWaitingForDialogs = true;
+            appendGlobalMediaDialogs(messagesController);
+            setGlobalMediaCacheObserverAccount(globalMediaSearchAccount);
+            startGlobalMediaCacheLoadRound();
             if (!messagesController.isLoadingDialogs(globalMediaSearchFolder)) {
                 messagesController.loadDialogs(globalMediaSearchFolder, 0, 100, false);
             }
@@ -828,20 +1089,45 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         }
 
         globalMediaWaitingForDialogs = false;
-        globalMediaDialogSearches = new ArrayList<>();
+        appendGlobalMediaDialogs(messagesController);
+        setGlobalMediaCacheObserverAccount(globalMediaSearchAccount);
+        startGlobalMediaCacheLoadRound();
+        startGlobalMediaDialogBatch(generation);
+    }
+
+    private void appendGlobalMediaDialogs(MessagesController messagesController) {
+        if (globalMediaDialogSearches == null) {
+            globalMediaDialogSearches = new ArrayList<>();
+        }
         ArrayList<TLRPC.Dialog> dialogs = new ArrayList<>(messagesController.getDialogs(globalMediaSearchFolder));
         dialogs.sort((left, right) -> Integer.compare(right.last_message_date, left.last_message_date));
         for (TLRPC.Dialog dialog : dialogs) {
             if (dialog == null || dialog.isFolder || dialog.id == 0 || DialogObject.isEncryptedDialog(dialog.id)) {
                 continue;
             }
-            TLRPC.InputPeer peer = messagesController.getInputPeer(dialog.id);
-            if (peer == null || peer instanceof TLRPC.TL_inputPeerEmpty) {
+            if (!globalMediaDialogIds.add(dialog.id)) {
                 continue;
             }
-            globalMediaDialogSearches.add(new GlobalMediaDialogSearch(dialog.id, peer));
+            TLRPC.InputPeer peer = messagesController.getInputPeer(dialog.id);
+            if (peer == null || peer instanceof TLRPC.TL_inputPeerEmpty) {
+                globalMediaDialogIds.remove(dialog.id);
+                continue;
+            }
+            GlobalMediaDialogSearch dialogSearch = new GlobalMediaDialogSearch(dialog.id, peer);
+            loadGlobalMediaCacheState(dialogSearch);
+            globalMediaDialogSearches.add(dialogSearch);
         }
-        startGlobalMediaDialogBatch(generation);
+        updateGlobalMediaTotalCount();
+    }
+
+    private void updateGlobalMediaTotalCount() {
+        long count = 0;
+        if (globalMediaDialogSearches != null) {
+            for (GlobalMediaDialogSearch dialogSearch : globalMediaDialogSearches) {
+                count += dialogSearch.count;
+            }
+        }
+        totalCount = (int) Math.min(Integer.MAX_VALUE, count);
     }
 
     private void startGlobalMediaDialogBatch(int generation) {
@@ -860,6 +1146,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         if (globalMediaDialogBatch.isEmpty()) {
             isLoading = false;
             endReached = true;
+            updateGlobalMediaTotalCount();
             updateGlobalMediaResults(generation);
             return;
         }
@@ -895,7 +1182,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         request.q = "";
         request.filter = new TLRPC.TL_inputMessagesFilterPhotoVideo();
         request.limit = GLOBAL_MEDIA_PAGE_SIZE;
-        request.offset_id = dialogSearch.offsetId;
+        request.offset_id = dialogSearch.catchingUp ? dialogSearch.catchupOffsetId : dialogSearch.offsetId;
         if (currentSearchMinDate > 0) {
             request.min_date = (int) (currentSearchMinDate / 1000);
         }
@@ -925,18 +1212,66 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                     controller.putChats(result.chats, false);
                     controller.removeDeletedMessagesFromArray(dialogSearch.dialogId, result.messages);
                     dialogSearch.count = Math.max(result.count, result.messages.size());
-                    dialogSearch.endReached = result.messages.isEmpty() || (!result.inexact && result.messages.size() < GLOBAL_MEDIA_PAGE_SIZE);
+                    boolean pageEndReached = result.messages.isEmpty()
+                            || (!result.inexact && result.messages.size() < GLOBAL_MEDIA_PAGE_SIZE);
                     MessageObject lastMessageObject = null;
+                    int oldestMessageId = 0;
                     if (!result.messages.isEmpty()) {
-                        dialogSearch.offsetId = result.messages.get(result.messages.size() - 1).id;
+                        oldestMessageId = result.messages.get(result.messages.size() - 1).id;
+                        for (TLRPC.Message message : result.messages) {
+                            message.dialog_id = dialogSearch.dialogId;
+                        }
+                        MessagesStorage.getInstance(globalMediaSearchAccount).putMessages(
+                                result.messages, true, true, true, 0, ChatActivity.MODE_DEFAULT, 0);
                         for (TLRPC.Message message : result.messages) {
                             MessageObject messageObject = new MessageObject(globalMediaSearchAccount, message, false, true);
-                            messageObject.setQuery("");
-                            rawMessages.add(messageObject);
+                            addGlobalMediaMessage(messageObject);
                             lastMessageObject = messageObject;
                         }
                     }
-                    dialogSearch.pendingGroupKey = !dialogSearch.endReached && lastMessageObject != null ? getMediaGroupKey(lastMessageObject) : null;
+                    if (dialogSearch.catchingUp) {
+                        if (dialogSearch.catchupOffsetId == 0) {
+                            dialogSearch.pendingHeadBoundaryId = oldestMessageId;
+                        }
+                        boolean initialHeadScan = dialogSearch.catchupBoundaryId <= 0;
+                        boolean catchupComplete = result.messages.isEmpty() || initialHeadScan
+                                || oldestMessageId <= dialogSearch.catchupBoundaryId || pageEndReached;
+                        if (catchupComplete) {
+                            dialogSearch.headBoundaryId = dialogSearch.pendingHeadBoundaryId;
+                            dialogSearch.lastHeadSyncAt = System.currentTimeMillis();
+                            dialogSearch.catchingUp = false;
+                            dialogSearch.catchupOffsetId = 0;
+                            dialogSearch.catchupBoundaryId = 0;
+                            dialogSearch.pendingHeadBoundaryId = 0;
+                            if (initialHeadScan) {
+                                dialogSearch.offsetId = oldestMessageId;
+                                dialogSearch.historyEndReached = pageEndReached;
+                                dialogSearch.historyPendingGroupKey = !dialogSearch.historyEndReached && lastMessageObject != null
+                                        ? getMediaGroupKey(lastMessageObject) : null;
+                            }
+                            dialogSearch.endReached = dialogSearch.historyEndReached;
+                            dialogSearch.pendingGroupKey = initialHeadScan && !dialogSearch.historyEndReached
+                                    && lastMessageObject != null ? getMediaGroupKey(lastMessageObject) : null;
+                        } else {
+                            dialogSearch.catchupOffsetId = oldestMessageId;
+                            dialogSearch.endReached = false;
+                            dialogSearch.pendingGroupKey = lastMessageObject != null ? getMediaGroupKey(lastMessageObject) : null;
+                        }
+                    } else {
+                        if (oldestMessageId != 0) {
+                            dialogSearch.offsetId = oldestMessageId;
+                        }
+                        dialogSearch.historyEndReached = pageEndReached;
+                        dialogSearch.endReached = dialogSearch.historyEndReached;
+                        dialogSearch.pendingGroupKey = !dialogSearch.historyEndReached && lastMessageObject != null
+                                ? getMediaGroupKey(lastMessageObject) : null;
+                        dialogSearch.historyPendingGroupKey = dialogSearch.pendingGroupKey;
+                    }
+                    if (result.messages.isEmpty()) {
+                        saveGlobalMediaCacheState(dialogSearch);
+                    } else {
+                        saveGlobalMediaCacheStateAfterMessagesStored(dialogSearch);
+                    }
                 } else {
                     dialogSearch.failedAttempts++;
                     dialogSearch.failed = true;
@@ -961,12 +1296,10 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                     globalMediaDialogBatch = null;
                     isLoading = false;
                     endReached = true;
-                    long count = 0;
-                    for (GlobalMediaDialogSearch search : globalMediaDialogSearches) {
-                        endReached &= search.endReached;
-                        count += search.count;
+                    for (GlobalMediaDialogSearch dialogSearch : globalMediaDialogSearches) {
+                        endReached &= dialogSearch.endReached;
                     }
-                    totalCount = (int) Math.min(Integer.MAX_VALUE, count);
+                    updateGlobalMediaTotalCount();
                     updateGlobalMediaResults(generation);
                     startGlobalMediaDialogBatch(generation);
                 } else {
@@ -1140,6 +1473,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         if (forceClear || currentSearchFilter == null && communityId == 0 && dialogId == 0 && minDate == 0 && maxDate == 0) {
             messages.clear();
             rawMessages.clear();
+            globalMediaMessageIds.clear();
             sections.clear();
             sectionArrays.clear();
             isLoading = true;
@@ -1189,6 +1523,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             if (!filterAndQueryIsSame || globalMediaSearchAccount != currentAccount || globalMediaSearchFolder != (includeFolder ? 1 : 0)) {
                 resetGlobalMediaDialogSearch();
                 rawMessages.clear();
+                globalMediaMessageIds.clear();
                 messages.clear();
                 messagesById.clear();
                 sections.clear();
@@ -1315,6 +1650,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                     if (!filterAndQueryIsSame) {
                         messages.clear();
                         rawMessages.clear();
+                        globalMediaMessageIds.clear();
                         messagesById.clear();
                         sections.clear();
                         sectionArrays.clear();
@@ -2168,6 +2504,10 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         NotificationCenter notificationCenter = NotificationCenter.getInstance(lastAccount = UserConfig.selectedAccount);
         notificationCenter.addObserver(this, NotificationCenter.emojiLoaded);
         notificationCenter.addObserver(this, NotificationCenter.dialogsNeedReload);
+        if (globalMediaSearchGeneration != -1) {
+            setGlobalMediaCacheObserverAccount(globalMediaSearchAccount);
+            startGlobalMediaCacheLoadRound();
+        }
         if (globalMediaWaitingForDialogs && globalMediaSearchGeneration == requestIndex) {
             continueGlobalMediaSearch(globalMediaSearchGeneration);
         } else if (globalMediaDialogBatch != null && globalMediaRequestsInFlight == 0
@@ -2182,6 +2522,14 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         NotificationCenter notificationCenter = NotificationCenter.getInstance(lastAccount);
         notificationCenter.removeObserver(this, NotificationCenter.emojiLoaded);
         notificationCenter.removeObserver(this, NotificationCenter.dialogsNeedReload);
+        setGlobalMediaCacheObserverAccount(-1);
+        if (globalMediaCacheRequestInFlight) {
+            globalMediaCacheRequestToken++;
+            globalMediaCacheRequestInFlight = false;
+            globalMediaCacheLoadingDialog = null;
+        }
+        globalMediaCacheBatch = null;
+        globalMediaCacheBatchCursor = 0;
         if (globalMediaDispatchRunnable != null) {
             AndroidUtilities.cancelRunOnUIThread(globalMediaDispatchRunnable);
             globalMediaDispatchRunnable = null;
@@ -2203,6 +2551,8 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 && globalMediaWaitingForDialogs
                 && globalMediaSearchGeneration == requestIndex) {
             continueGlobalMediaSearch(globalMediaSearchGeneration);
+        } else if (id == NotificationCenter.mediaDidLoad && account == globalMediaSearchAccount) {
+            onGlobalMediaCacheLoaded(args);
         }
     }
 

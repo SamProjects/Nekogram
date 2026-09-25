@@ -4170,6 +4170,7 @@ public class MediaDataController extends BaseController {
     public final static int MEDIA_VIDEOS_ONLY = 7;
     public final static int MEDIA_POLL = 8;
     public final static int MEDIA_TYPES_COUNT = 9;
+    public final static int MEDIA_CACHE_ONLY_NO_HOLES = 3;
 
 
     public void loadMedia(long dialogId, int count, int max_id, int min_id, int type, long topicId, int fromCache, int classGuid, int requestIndex, ReactionsLayoutInBubble.VisibleReaction tag, String query) {
@@ -4179,7 +4180,7 @@ public class MediaDataController extends BaseController {
             FileLog.d("load media did " + dialogId + " count = " + count + " max_id " + max_id + " type = " + type + " cache = " + fromCache + " classGuid = " + classGuid);
         }
         if (fromCache != 0 && TextUtils.isEmpty(query) || DialogObject.isEncryptedDialog(dialogId)) {
-            loadMediaDatabase(dialogId, count, max_id, min_id, type, topicId, tag, classGuid, isChannel, fromCache, requestIndex);
+            loadMediaDatabase(dialogId, count, max_id, min_id, type, topicId, tag, classGuid, isChannel, fromCache, requestIndex, 0, 0);
         } else {
             TLRPC.TL_messages_search req = new TLRPC.TL_messages_search();
             req.limit = count;
@@ -4247,6 +4248,12 @@ public class MediaDataController extends BaseController {
             });
             getConnectionsManager().bindRequestToGuid(reqId, classGuid);
         }
+    }
+
+    public void loadMediaFromCacheNoHoles(long dialogId, int count, int maxId, int type, int minDate, int maxDate, int classGuid, int requestIndex) {
+        boolean isChannel = DialogObject.isChatDialog(dialogId) && ChatObject.isChannel(-dialogId, currentAccount);
+        loadMediaDatabase(dialogId, count, maxId, 0, type, 0, null, classGuid, isChannel,
+                MEDIA_CACHE_ONLY_NO_HOLES, requestIndex, minDate, maxDate);
     }
 
     public void getMediaCounts(long dialogId, long topicId, int classGuid) {
@@ -4503,7 +4510,7 @@ public class MediaDataController extends BaseController {
             }
             FileLog.d("process load media messagesCount " + messagesCount + " did " + dialogId + " topicId " + topicId + " count = " + count + " max_id=" + max_id + " min_id=" + min_id + " type = " + type + " cache = " + fromCache + " classGuid = " + classGuid + " topReached=" + topReached);
         }
-        if (fromCache != 0 && res != null && res.messages != null && ((res.messages.isEmpty() && min_id == 0) || (res.messages.size() <= 1 && min_id != 0)) && !DialogObject.isEncryptedDialog(dialogId)) {
+        if (fromCache != 0 && fromCache != MEDIA_CACHE_ONLY_NO_HOLES && res != null && res.messages != null && ((res.messages.isEmpty() && min_id == 0) || (res.messages.size() <= 1 && min_id != 0)) && !DialogObject.isEncryptedDialog(dialogId)) {
             if (fromCache == 2) {
                 return;
             }
@@ -4633,7 +4640,7 @@ public class MediaDataController extends BaseController {
         });
     }
 
-    private void loadMediaDatabase(long uid, int count, int max_id, int min_id, int type, long topicId, ReactionsLayoutInBubble.VisibleReaction tag, int classGuid, boolean isChannel, int fromCache, int requestIndex) {
+    private void loadMediaDatabase(long uid, int count, int max_id, int min_id, int type, long topicId, ReactionsLayoutInBubble.VisibleReaction tag, int classGuid, boolean isChannel, int fromCache, int requestIndex, int cacheMinDate, int cacheMaxDate) {
         Runnable runnable = new Runnable() {
             @Override
             public void run() {
@@ -4651,7 +4658,7 @@ public class MediaDataController extends BaseController {
                     boolean reverseMessages = false;
 
                     if (!DialogObject.isEncryptedDialog(uid)) {
-                        if (min_id == 0) {
+                        if (min_id == 0 && fromCache != MEDIA_CACHE_ONLY_NO_HOLES) {
                             if (topicId != 0) {
                                 cursor = database.queryFinalized(String.format(Locale.US, "SELECT start FROM media_holes_topics WHERE uid = %d AND topic_id = %d AND type = %d AND start IN (0, 1)", uid, topicId, type));
                             } else {
@@ -4707,7 +4714,16 @@ public class MediaDataController extends BaseController {
                         }
 
                         int holeMessageId = 0;
-                        if (max_id != 0) {
+                        if (fromCache == MEDIA_CACHE_ONLY_NO_HOLES && min_id == 0) {
+                            String mediaTable = topicId != 0 ? "media_topics" : "media_v4";
+                            String topicFilter = topicId != 0 ? " AND m.topic_id = " + topicId : "";
+                            String maxFilter = max_id != 0 ? " AND m.mid < " + max_id : "";
+                            String dateFilter = (cacheMinDate > 0 ? " AND m.date >= " + cacheMinDate : "")
+                                    + (cacheMaxDate > 0 ? " AND m.date <= " + cacheMaxDate : "");
+                            cursor = database.queryFinalized(String.format(Locale.US,
+                                    "SELECT m.data, m.mid FROM %s m %s WHERE %s m.uid = %d%s AND m.mid > 0%s%s AND m.type = %d ORDER BY m.date DESC, m.mid DESC LIMIT %d",
+                                    mediaTable, beforeWhere, afterWhere, uid, topicFilter, maxFilter, dateFilter, type, countToLoad));
+                        } else if (max_id != 0) {
                             int startHole = 0;
                             if (topicId != 0) {
                                 cursor = database.queryFinalized(String.format(Locale.US, "SELECT start, end FROM media_holes_topics WHERE uid = %d AND topic_id = %d AND type = %d AND start <= %d ORDER BY end DESC LIMIT 1", uid, topicId, type, max_id));
