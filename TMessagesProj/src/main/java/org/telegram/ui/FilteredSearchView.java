@@ -1296,8 +1296,8 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                     globalMediaDialogBatch = null;
                     isLoading = false;
                     endReached = true;
-                    for (GlobalMediaDialogSearch dialogSearch : globalMediaDialogSearches) {
-                        endReached &= dialogSearch.endReached;
+                    for (GlobalMediaDialogSearch dialogState : globalMediaDialogSearches) {
+                        endReached &= dialogState.endReached;
                     }
                     updateGlobalMediaTotalCount();
                     updateGlobalMediaResults(generation);
