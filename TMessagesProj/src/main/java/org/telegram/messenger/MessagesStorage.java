@@ -121,6 +121,7 @@ public class MessagesStorage extends BaseController {
     public final static int LAST_DB_VERSION = 177;
     private boolean databaseMigrationInProgress;
     public boolean showClearDatabaseAlert;
+    private boolean globalMediaSearchTablesChecked;
 
     public static final int FORUM_TYPE_CHAT = 1;
     public static final int FORUM_TYPE_CHAT_TABS = 1 << 1;
@@ -293,6 +294,7 @@ public class MessagesStorage extends BaseController {
     }
 
     public void openDatabase(int openTries) {
+        globalMediaSearchTablesChecked = false;
         if (!NativeLoader.loaded()) {
             int tryCount = 0;
             while (!NativeLoader.loaded()) {
@@ -1455,6 +1457,9 @@ public class MessagesStorage extends BaseController {
                 database.executeFast("DELETE FROM premium_promo").stepThis().dispose();
                 database.executeFast("DELETE FROM media_counts_v2").stepThis().dispose();
                 database.executeFast("DELETE FROM media_v4").stepThis().dispose();
+                // Coverage belongs to the cached messages, not to the account forever.
+                ensureGlobalMediaSearchTables();
+                database.executeFast("DELETE FROM global_media_search_state").stepThis().dispose();
 
 
                 cursor = database.queryFinalized("SELECT did FROM dialogs WHERE 1");
@@ -11303,6 +11308,430 @@ public class MessagesStorage extends BaseController {
             return 0;
         }
         return -1;
+    }
+
+    public static class GlobalMediaSearchProgress {
+        public static final int VERSION = 1;
+
+        public boolean initialized;
+        public int historyOffsetId;
+        public int headBoundaryId;
+        public int headFloorDate;
+        public long lastHeadSyncAt;
+        public boolean historyEndReached;
+        public boolean catchingUp;
+        public int catchupOffsetId;
+        public int catchupBoundaryId;
+        public int pendingHeadBoundaryId;
+        // Reconstructed from the cached history boundary, not a second source of truth.
+        public long pendingGroupId;
+    }
+
+    public static class GlobalMediaPage {
+        public final ArrayList<TLRPC.Message> messages = new ArrayList<>();
+        // Album members outside the seek page are filter context, never page rows.
+        public final ArrayList<TLRPC.Message> groupMessages = new ArrayList<>();
+        public final ArrayList<TLRPC.User> users = new ArrayList<>();
+        public final ArrayList<TLRPC.Chat> chats = new ArrayList<>();
+        public int cursorDate;
+        public long cursorDialogId;
+        public int cursorMessageId;
+        public boolean hasMore;
+        public boolean failed;
+    }
+
+    public interface GlobalMediaPageCallback {
+        void onLoaded(GlobalMediaPage page);
+    }
+
+    private void ensureGlobalMediaSearchTables() throws Exception {
+        if (globalMediaSearchTablesChecked) {
+            return;
+        }
+        database.executeFast("CREATE TABLE IF NOT EXISTS global_media_search_state(uid INTEGER PRIMARY KEY, version INTEGER, initialized INTEGER, history_offset_id INTEGER, head_boundary_id INTEGER, head_floor_date INTEGER, last_head_sync_at INTEGER, history_end_reached INTEGER, catching_up INTEGER, catchup_offset_id INTEGER, catchup_boundary_id INTEGER, pending_head_boundary_id INTEGER)").stepThis().dispose();
+        database.executeFast("CREATE INDEX IF NOT EXISTS uid_group_mid_idx_messages_v2 ON messages_v2(uid, group_id, mid)").stepThis().dispose();
+        database.executeFast("CREATE INDEX IF NOT EXISTS type_date_uid_mid_idx_media_v4 ON media_v4(type, date DESC, uid DESC, mid DESC)").stepThis().dispose();
+        globalMediaSearchTablesChecked = true;
+    }
+
+    public void loadGlobalMediaSearchProgress(ArrayList<Long> dialogIds, Consumer<HashMap<Long, GlobalMediaSearchProgress>> callback) {
+        storageQueue.postRunnable(() -> {
+            HashMap<Long, GlobalMediaSearchProgress> result = new HashMap<>();
+            SQLiteCursor progressCursor = null;
+            try {
+                ensureGlobalMediaSearchTables();
+                if (dialogIds != null && !dialogIds.isEmpty()) {
+                    StringBuilder ids = new StringBuilder();
+                    for (Long dialogId : dialogIds) {
+                        if (dialogId == null) {
+                            continue;
+                        }
+                        if (ids.length() > 0) {
+                            ids.append(',');
+                        }
+                        ids.append(dialogId);
+                    }
+                    if (ids.length() > 0) {
+                        SQLiteCursor cursor = progressCursor = database.queryFinalized("SELECT uid, version, initialized, history_offset_id, head_boundary_id, head_floor_date, last_head_sync_at, history_end_reached, catching_up, catchup_offset_id, catchup_boundary_id, pending_head_boundary_id FROM global_media_search_state WHERE uid IN (" + ids + ")");
+                        while (cursor.next()) {
+                            if (cursor.intValue(1) != GlobalMediaSearchProgress.VERSION) {
+                                continue;
+                            }
+                            GlobalMediaSearchProgress state = new GlobalMediaSearchProgress();
+                            state.initialized = cursor.intValue(2) != 0;
+                            state.historyOffsetId = cursor.intValue(3);
+                            state.headBoundaryId = cursor.intValue(4);
+                            state.headFloorDate = cursor.intValue(5);
+                            state.lastHeadSyncAt = cursor.longValue(6);
+                            state.historyEndReached = cursor.intValue(7) != 0;
+                            state.catchingUp = cursor.intValue(8) != 0;
+                            state.catchupOffsetId = cursor.intValue(9);
+                            state.catchupBoundaryId = cursor.intValue(10);
+                            state.pendingHeadBoundaryId = cursor.intValue(11);
+                            long dialogId = cursor.longValue(0);
+                            // Per-dialog cache cleanup and message deletion can invalidate a checkpoint.
+                            // Re-scan conservatively if either recorded boundary is no longer cached.
+                            boolean valid = true;
+                            for (int boundary : new int[]{state.historyOffsetId, state.headBoundaryId}) {
+                                if (boundary <= 0) {
+                                    continue;
+                                }
+                                SQLiteCursor boundaryCursor = database.queryFinalized("SELECT mid, data, date FROM media_v4 WHERE uid = ? AND mid = ? AND type = 0", dialogId, boundary);
+                                try {
+                                    if (!boundaryCursor.next()) {
+                                        valid = false;
+                                    } else if (boundary == state.historyOffsetId && !state.historyEndReached) {
+                                        TLRPC.Message boundaryMessage = deserializeGlobalMediaMessage(boundaryCursor.byteBufferValue(1), boundary, dialogId, boundaryCursor.intValue(2));
+                                        if (boundaryMessage == null) {
+                                            valid = false;
+                                        } else {
+                                            state.pendingGroupId = boundaryMessage.grouped_id;
+                                        }
+                                    }
+                                } finally {
+                                    boundaryCursor.dispose();
+                                }
+                            }
+                            if (valid) {
+                                result.put(dialogId, state);
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                checkSQLException(e);
+                result.clear();
+            } finally {
+                if (progressCursor != null) progressCursor.dispose();
+            }
+            HashMap<Long, GlobalMediaSearchProgress> resultFinal = result;
+            AndroidUtilities.runOnUIThread(() -> callback.accept(resultFinal));
+        });
+    }
+
+    public void saveGlobalMediaSearchProgress(long dialogId, GlobalMediaSearchProgress progress, Consumer<Boolean> callback) {
+        storageQueue.postRunnable(() -> {
+            boolean saved = false;
+            try {
+                ensureGlobalMediaSearchTables();
+                writeGlobalMediaSearchProgressInternal(dialogId, progress);
+                saved = true;
+            } catch (Exception e) {
+                checkSQLException(e);
+            }
+            boolean savedFinal = saved;
+            if (callback != null) {
+                AndroidUtilities.runOnUIThread(() -> callback.accept(savedFinal));
+            }
+        });
+    }
+
+    private void writeGlobalMediaSearchProgressInternal(long dialogId, GlobalMediaSearchProgress progress) throws Exception {
+        SQLitePreparedStatement statement = database.executeFast("REPLACE INTO global_media_search_state(uid, version, initialized, history_offset_id, head_boundary_id, head_floor_date, last_head_sync_at, history_end_reached, catching_up, catchup_offset_id, catchup_boundary_id, pending_head_boundary_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        try {
+            statement.bindLong(1, dialogId);
+            statement.bindInteger(2, GlobalMediaSearchProgress.VERSION);
+            statement.bindInteger(3, progress.initialized ? 1 : 0);
+            statement.bindInteger(4, progress.historyOffsetId);
+            statement.bindInteger(5, progress.headBoundaryId);
+            statement.bindInteger(6, progress.headFloorDate);
+            statement.bindLong(7, progress.lastHeadSyncAt);
+            statement.bindInteger(8, progress.historyEndReached ? 1 : 0);
+            statement.bindInteger(9, progress.catchingUp ? 1 : 0);
+            statement.bindInteger(10, progress.catchupOffsetId);
+            statement.bindInteger(11, progress.catchupBoundaryId);
+            statement.bindInteger(12, progress.pendingHeadBoundaryId);
+            statement.step();
+        } finally {
+            statement.dispose();
+        }
+    }
+
+    public void putGlobalMediaSearchMessages(ArrayList<TLRPC.Message> messages, long dialogId, GlobalMediaSearchProgress progress, Consumer<Boolean> callback) {
+        storageQueue.postRunnable(() -> {
+            boolean stored = false;
+            boolean savepoint = false;
+            try {
+                ensureGlobalMediaSearchTables();
+                database.executeFast("SAVEPOINT global_media_page").stepThis().dispose();
+                savepoint = true;
+                if (messages != null && !messages.isEmpty()) {
+                    for (TLRPC.Message message : messages) {
+                        message.dialog_id = dialogId;
+                        if (message.id <= 0 || !MediaDataController.canAddMessageToMedia(message)
+                                || MediaDataController.getMediaType(message) != MediaDataController.MEDIA_PHOTOVIDEO
+                                || MessageObject.isEphemeral(message)) {
+                            continue;
+                        }
+                        // A history cache fill is not an incoming-message event: leave dialogs,
+                        // unread counters, topics and existing local message parameters untouched.
+                        MessageObject.normalizeFlags(message);
+                        NativeByteBuffer data = new NativeByteBuffer(message.getObjectSize());
+                        SQLitePreparedStatement messageStatement = null;
+                        SQLitePreparedStatement mediaStatement = null;
+                        try {
+                            message.serializeToStream(data);
+                            messageStatement = database.executeFast("INSERT OR IGNORE INTO messages_v2(mid, uid, read_state, send_state, date, data, out, ttl, media, imp, mention, forwards, thread_reply_id, is_channel, reply_to_message_id, group_id, reply_to_story_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                            messageStatement.bindInteger(1, message.id);
+                            messageStatement.bindLong(2, dialogId);
+                            messageStatement.bindInteger(3, MessageObject.getUnreadFlags(message));
+                            messageStatement.bindInteger(4, message.send_state);
+                            messageStatement.bindInteger(5, message.date);
+                            messageStatement.bindByteBuffer(6, data);
+                            messageStatement.bindInteger(7, MessageObject.isOut(message) || message.from_scheduled ? 1 : 0);
+                            messageStatement.bindInteger(8, message.ttl);
+                            messageStatement.bindInteger(9, (message.flags & TLRPC.MESSAGE_FLAG_HAS_VIEWS) != 0 ? message.views : getMessageMediaType(message));
+                            messageStatement.bindInteger(10, message.stickerVerified == 0 ? 1 : message.stickerVerified == 2 ? 2 : 0);
+                            messageStatement.bindInteger(11, message.mentioned ? 1 : 0);
+                            messageStatement.bindInteger(12, message.forwards);
+                            messageStatement.bindInteger(13, message.reply_to == null ? 0 : message.reply_to.reply_to_top_id != 0 ? message.reply_to.reply_to_top_id : message.reply_to.reply_to_msg_id);
+                            messageStatement.bindLong(14, MessageObject.getChannelId(message));
+                            messageStatement.bindInteger(15, message.reply_to == null ? 0 : message.reply_to.reply_to_msg_id);
+                            messageStatement.bindLong(16, message.grouped_id);
+                            messageStatement.bindInteger(17, message.reply_to == null ? 0 : message.reply_to.story_id);
+                            messageStatement.step();
+                            mediaStatement = database.executeFast("REPLACE INTO media_v4(mid, uid, date, type, data) VALUES(?, ?, ?, ?, ?)");
+                            mediaStatement.bindInteger(1, message.id);
+                            mediaStatement.bindLong(2, dialogId);
+                            mediaStatement.bindInteger(3, message.date);
+                            mediaStatement.bindInteger(4, MediaDataController.MEDIA_PHOTOVIDEO);
+                            mediaStatement.bindByteBuffer(5, data);
+                            mediaStatement.step();
+                        } finally {
+                            if (messageStatement != null) messageStatement.dispose();
+                            if (mediaStatement != null) mediaStatement.dispose();
+                            data.reuse();
+                        }
+                    }
+
+                    HashSet<Integer> expectedIds = new HashSet<>();
+                    for (TLRPC.Message message : messages) {
+                        if (message.id > 0 && MediaDataController.canAddMessageToMedia(message)
+                                && MediaDataController.getMediaType(message) == MediaDataController.MEDIA_PHOTOVIDEO
+                                && !MessageObject.isEphemeral(message)) {
+                            expectedIds.add(message.id);
+                        }
+                    }
+                    HashSet<Integer> storedIds = new HashSet<>();
+                    if (!expectedIds.isEmpty()) {
+                        StringBuilder ids = new StringBuilder();
+                        for (Integer messageId : expectedIds) {
+                            if (ids.length() > 0) {
+                                ids.append(',');
+                            }
+                            ids.append(messageId);
+                        }
+                        SQLiteCursor cursor = database.queryFinalized("SELECT m.mid FROM media_v4 m INNER JOIN messages_v2 g ON g.uid = m.uid AND g.mid = m.mid WHERE m.uid = " + dialogId + " AND m.type = " + MediaDataController.MEDIA_PHOTOVIDEO + " AND m.mid IN (" + ids + ")");
+                        try {
+                            while (cursor.next()) {
+                                storedIds.add(cursor.intValue(0));
+                            }
+                        } finally {
+                            cursor.dispose();
+                        }
+                    }
+                    stored = expectedIds.size() == storedIds.size() && storedIds.containsAll(expectedIds);
+                } else {
+                    stored = true;
+                }
+                if (stored && progress != null) {
+                    writeGlobalMediaSearchProgressInternal(dialogId, progress);
+                }
+                if (!stored) {
+                    database.executeFast("ROLLBACK TO global_media_page").stepThis().dispose();
+                }
+                database.executeFast("RELEASE global_media_page").stepThis().dispose();
+                savepoint = false;
+            } catch (Exception e) {
+                stored = false;
+                if (savepoint) {
+                    try {
+                        database.executeFast("ROLLBACK TO global_media_page").stepThis().dispose();
+                        database.executeFast("RELEASE global_media_page").stepThis().dispose();
+                    } catch (Exception rollbackError) {
+                        FileLog.e(rollbackError);
+                    }
+                }
+                checkSQLException(e);
+            }
+            boolean storedFinal = stored;
+            if (callback != null) {
+                AndroidUtilities.runOnUIThread(() -> callback.accept(storedFinal));
+            }
+        });
+    }
+
+    public void loadGlobalMediaPage(ArrayList<Long> dialogIds, int mediaType, int minDate, int maxDate, int limit,
+                                    int cursorDate, long cursorDialogId, int cursorMessageId, boolean newer,
+                                    GlobalMediaPageCallback callback) {
+        loadGlobalMediaPage(dialogIds, mediaType, minDate, maxDate, limit, cursorDate, cursorDialogId,
+                cursorMessageId, newer, null, callback);
+    }
+
+    public void loadGlobalMediaPage(ArrayList<Long> dialogIds, int mediaType, int minDate, int maxDate, int limit,
+                                    int cursorDate, long cursorDialogId, int cursorMessageId, boolean newer,
+                                    HashMap<Long, Integer> headBounds, GlobalMediaPageCallback callback) {
+        final HashMap<Long, Integer> snapshotBounds = headBounds == null ? null : new HashMap<>(headBounds);
+        storageQueue.postRunnable(() -> {
+            GlobalMediaPage page = new GlobalMediaPage();
+            try {
+                ensureGlobalMediaSearchTables();
+                if (dialogIds != null && !dialogIds.isEmpty() && limit > 0) {
+                    StringBuilder ids = new StringBuilder();
+                    for (Long dialogId : dialogIds) {
+                        if (dialogId == null) {
+                            continue;
+                        }
+                        if (ids.length() > 0) {
+                            ids.append(',');
+                        }
+                        ids.append(dialogId);
+                    }
+                    if (ids.length() > 0) {
+                        String where = "m.uid IN (" + ids + ") AND m.type = " + mediaType + " AND m.mid > 0"
+                                + (minDate > 0 ? " AND m.date >= " + minDate : "")
+                                + (maxDate > 0 ? " AND m.date <= " + maxDate : "");
+                        if (snapshotBounds != null) {
+                            StringBuilder bounds = new StringBuilder();
+                            for (Long dialogId : dialogIds) {
+                                Integer maxId = snapshotBounds.get(dialogId);
+                                if (maxId == null || maxId <= 0) {
+                                    continue;
+                                }
+                                bounds.append(" WHEN ").append(dialogId).append(" THEN ").append(maxId);
+                            }
+                            // CASE avoids SQLite's expression-depth limit for thousands of peers.
+                            where += bounds.length() == 0 ? " AND 0" : " AND m.mid <= CASE m.uid" + bounds + " ELSE 0 END";
+                        }
+                        String cursorWhere = "";
+                        if (cursorDate > 0) {
+                            cursorWhere = newer
+                                    ? " AND (m.date > " + cursorDate + " OR (m.date = " + cursorDate + " AND (m.uid > " + cursorDialogId + " OR (m.uid = " + cursorDialogId + " AND m.mid > " + cursorMessageId + "))))"
+                                    : " AND (m.date < " + cursorDate + " OR (m.date = " + cursorDate + " AND (m.uid < " + cursorDialogId + " OR (m.uid = " + cursorDialogId + " AND m.mid < " + cursorMessageId + "))))";
+                        }
+                        String order = newer ? "ASC" : "DESC";
+                        SQLiteCursor cursor = database.queryFinalized("SELECT m.data, m.mid, m.uid, m.date FROM media_v4 m WHERE " + where + cursorWhere + " ORDER BY m.date " + order + ", m.uid " + order + ", m.mid " + order + " LIMIT " + (limit + 1));
+                        ArrayList<TLRPC.Message> baseMessages = new ArrayList<>();
+                        try {
+                            while (cursor.next()) {
+                                TLRPC.Message message = deserializeGlobalMediaMessage(cursor.byteBufferValue(0), cursor.intValue(1), cursor.longValue(2), cursor.intValue(3));
+                                if (message == null) {
+                                    throw new IllegalStateException("Unreadable cached media page");
+                                }
+                                baseMessages.add(message);
+                            }
+                        } finally {
+                            cursor.dispose();
+                        }
+                        page.hasMore = baseMessages.size() > limit;
+                        if (page.hasMore) {
+                            baseMessages.remove(baseMessages.size() - 1);
+                        }
+                        if (!baseMessages.isEmpty()) {
+                            TLRPC.Message cursorMessage = baseMessages.get(baseMessages.size() - 1);
+                            page.cursorDate = cursorMessage.date;
+                            page.cursorDialogId = cursorMessage.dialog_id;
+                            page.cursorMessageId = cursorMessage.id;
+
+                            LinkedHashMap<String, TLRPC.Message> completePage = new LinkedHashMap<>();
+                            HashSet<String> groupsToExpand = new HashSet<>();
+                            for (TLRPC.Message message : baseMessages) {
+                                completePage.put(message.dialog_id + ":" + message.id, message);
+                                if (message.grouped_id != 0) {
+                                    groupsToExpand.add(message.dialog_id + ":" + message.grouped_id);
+                                }
+                            }
+                            for (String groupKey : groupsToExpand) {
+                                int separator = groupKey.indexOf(':');
+                                long groupDialogId = Long.parseLong(groupKey.substring(0, separator));
+                                long groupedId = Long.parseLong(groupKey.substring(separator + 1));
+                                SQLiteCursor groupCursor = database.queryFinalized("SELECT m.data, m.mid, m.date FROM messages_v2 g INNER JOIN media_v4 m ON m.uid = g.uid AND m.mid = g.mid AND m.type = " + mediaType + " WHERE g.uid = " + groupDialogId + " AND g.group_id = " + groupedId + " ORDER BY m.date DESC, m.mid DESC");
+                                try {
+                                    while (groupCursor.next()) {
+                                        TLRPC.Message message = deserializeGlobalMediaMessage(groupCursor.byteBufferValue(0), groupCursor.intValue(1), groupDialogId, groupCursor.intValue(2));
+                                        if (message == null) {
+                                            throw new IllegalStateException("Unreadable cached media group");
+                                        }
+                                        completePage.put(message.dialog_id + ":" + message.id, message);
+                                    }
+                                } finally {
+                                    groupCursor.dispose();
+                                }
+                            }
+                            page.messages.addAll(baseMessages);
+                            page.groupMessages.addAll(completePage.values());
+                            page.messages.sort((left, right) -> {
+                                int dateComparison = Integer.compare(right.date, left.date);
+                                if (dateComparison != 0) {
+                                    return dateComparison;
+                                }
+                                int dialogComparison = Long.compare(right.dialog_id, left.dialog_id);
+                                return dialogComparison != 0 ? dialogComparison : Integer.compare(right.id, left.id);
+                            });
+                            ArrayList<Long> usersToLoad = new ArrayList<>();
+                            ArrayList<Long> chatsToLoad = new ArrayList<>();
+                            for (TLRPC.Message message : page.groupMessages) {
+                                addUsersAndChatsFromMessage(message, usersToLoad, chatsToLoad, null);
+                            }
+                            if (!usersToLoad.isEmpty()) {
+                                getUsersInternal(usersToLoad, page.users);
+                            }
+                            if (!chatsToLoad.isEmpty()) {
+                                getChatsInternal(TextUtils.join(",", chatsToLoad), page.chats);
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                checkSQLException(e);
+                page.messages.clear();
+                page.failed = true;
+            }
+            GlobalMediaPage pageFinal = page;
+            AndroidUtilities.runOnUIThread(() -> callback.onLoaded(pageFinal));
+        });
+    }
+
+    private TLRPC.Message deserializeGlobalMediaMessage(NativeByteBuffer data, int messageId, long dialogId, int date) {
+        if (data == null) {
+            return null;
+        }
+        try {
+            TLRPC.Message message = TLRPC.Message.TLdeserialize(data, data.readInt32(false), false);
+            if (message == null) {
+                return null;
+            }
+            message.readAttachPath(data, getUserConfig().getClientUserId());
+            message.id = messageId;
+            message.dialog_id = dialogId;
+            message.date = date;
+            return message;
+        } catch (Exception e) {
+            FileLog.e(e);
+            return null;
+        } finally {
+            data.reuse();
+        }
     }
 
     public void putWebPages(LongSparseArray<TLRPC.WebPage> webPages) {
