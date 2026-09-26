@@ -145,6 +145,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     private int totalCount;
     private int requestIndex;
     private static final int GLOBAL_MEDIA_PAGE_SIZE = 10;
+    private static final int GLOBAL_MEDIA_REFRESH_BATCH_SIZE = 100;
     private static final int GLOBAL_MEDIA_WINDOW_SIZE = 1000;
     private static final int GLOBAL_MEDIA_WINDOW_ADVANCE = 400;
     private static final long GLOBAL_MEDIA_REQUEST_INTERVAL_MS = 200;
@@ -175,6 +176,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     private int globalMediaScrollState = RecyclerView.SCROLL_STATE_IDLE;
     private boolean globalMediaLoadRequestedForGesture;
     private boolean globalMediaResultsDirty;
+    private int globalMediaMessagesSinceRefresh;
     private MessageObject globalMediaWindowAnchorMessage;
     private boolean globalMediaWaitingForDialogs;
     private boolean hidePhotoOnlyMedia;
@@ -724,7 +726,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         if (currentSearchFilter != null
                 && currentSearchFilter.filterType == FiltersView.FILTER_TYPE_MEDIA
                 && TextUtils.isEmpty(currentSearchString)) {
-            messages.sort((left, right) -> Integer.compare(right.messageOwner.date, left.messageOwner.date));
+            messages.sort(this::compareGlobalMediaMessages);
         }
 
         for (MessageObject messageObject : messages) {
@@ -976,10 +978,26 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         messageObject.setQuery("");
         rawMessages.add(messageObject);
         globalMediaResultsDirty = true;
+        globalMediaMessagesSinceRefresh++;
         if (rawMessages.size() > GLOBAL_MEDIA_WINDOW_SIZE + GLOBAL_MEDIA_PAGE_SIZE * 10) {
             trimGlobalMediaWindow(false);
         }
+        if (globalMediaMessagesSinceRefresh >= GLOBAL_MEDIA_REFRESH_BATCH_SIZE) {
+            flushGlobalMediaResults(globalMediaSearchGeneration);
+        }
         return true;
+    }
+
+    private int compareGlobalMediaMessages(MessageObject left, MessageObject right) {
+        int dateComparison = Integer.compare(right.messageOwner.date, left.messageOwner.date);
+        if (dateComparison != 0) {
+            return dateComparison;
+        }
+        int dialogComparison = Long.compare(right.getDialogId(), left.getDialogId());
+        if (dialogComparison != 0) {
+            return dialogComparison;
+        }
+        return Integer.compare(right.getId(), left.getId());
     }
 
     private boolean isGlobalMediaWindowFull() {
@@ -1008,7 +1026,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         if (rawMessages.size() <= GLOBAL_MEDIA_WINDOW_SIZE && !discardNewestPage) {
             return;
         }
-        rawMessages.sort((left, right) -> Integer.compare(right.messageOwner.date, left.messageOwner.date));
+        rawMessages.sort(this::compareGlobalMediaMessages);
         if (discardNewestPage) {
             int removeCount = Math.min(GLOBAL_MEDIA_WINDOW_ADVANCE, rawMessages.size());
             rawMessages.subList(0, removeCount).clear();
@@ -1038,6 +1056,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             return;
         }
         globalMediaResultsDirty = false;
+        globalMediaMessagesSinceRefresh = 0;
         scheduleGlobalMediaResultsUpdate(generation);
     }
 
@@ -1184,6 +1203,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         globalMediaWindowResumeScheduled = false;
         globalMediaLoadRequestedForGesture = false;
         globalMediaResultsDirty = false;
+        globalMediaMessagesSinceRefresh = 0;
         globalMediaWindowAnchorMessage = null;
         if (globalMediaResultsUpdateRunnable != null) {
             AndroidUtilities.cancelRunOnUIThread(globalMediaResultsUpdateRunnable);
@@ -1465,7 +1485,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             }
         }
         trimGlobalMediaWindow(false);
-        rawMessages.sort((left, right) -> Integer.compare(right.messageOwner.date, left.messageOwner.date));
+        rawMessages.sort(this::compareGlobalMediaMessages);
         rebuildVisibleMessages();
         if (PhotoViewer.getInstance().isVisible()) {
             for (MessageObject messageObject : messages) {
