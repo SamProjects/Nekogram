@@ -172,6 +172,8 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     private long globalMediaLastRequestTime;
     private Runnable globalMediaResultsUpdateRunnable;
     private boolean globalMediaWindowResumeScheduled;
+    private int globalMediaScrollState = RecyclerView.SCROLL_STATE_IDLE;
+    private boolean globalMediaLoadRequestedForGesture;
     private boolean globalMediaWaitingForDialogs;
     private boolean hidePhotoOnlyMedia;
     private boolean hideShortVideos;
@@ -443,7 +445,9 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         recyclerListView.setOnScrollListener(new RecyclerView.OnScrollListener() {
             @Override
             public void onScrollStateChanged(RecyclerView recyclerView, int newState) {
+                globalMediaScrollState = newState;
                 if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
+                    globalMediaLoadRequestedForGesture = false;
                     AndroidUtilities.hideKeyboard(parentActivity.getCurrentFocus());
                 }
             }
@@ -459,7 +463,10 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 int totalItemCount = recyclerView.getAdapter().getItemCount();
                 if (globalMediaSearchGeneration != -1 && visibleItemCount > 0
                         && lastVisibleItem >= totalItemCount - 10 && hasMoreGlobalMediaPages()
-                        && !isGlobalMediaRoundRunning()) {
+                        && !isGlobalMediaRoundRunning() && dy > 0
+                        && globalMediaScrollState != RecyclerView.SCROLL_STATE_IDLE
+                        && !globalMediaLoadRequestedForGesture) {
+                    globalMediaLoadRequestedForGesture = true;
                     if (!globalMediaWindowResumeScheduled) {
                         globalMediaWindowResumeScheduled = true;
                         AndroidUtilities.runOnUIThread(() -> {
@@ -1013,13 +1020,12 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             return;
         }
         globalMediaResultsUpdateRunnable = () -> {
+            if (globalMediaScrollState != RecyclerView.SCROLL_STATE_IDLE) {
+                AndroidUtilities.runOnUIThread(globalMediaResultsUpdateRunnable, 150);
+                return;
+            }
             globalMediaResultsUpdateRunnable = null;
             updateGlobalMediaResults(generation);
-            if (generation == globalMediaSearchGeneration && isCustomMediaFilterActive()
-                    && messages.size() < columnsCount * 6 && hasMoreGlobalMediaPages()
-                    && !isGlobalMediaRoundRunning()) {
-                resumeGlobalMediaWindow();
-            }
         };
         AndroidUtilities.runOnUIThread(globalMediaResultsUpdateRunnable, 200);
     }
@@ -1028,14 +1034,10 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         if (globalMediaSearchGeneration == -1 || !hasMoreGlobalMediaPages() || isGlobalMediaRoundRunning()) {
             return;
         }
-        int firstVisibleRow = layoutManager.findFirstVisibleItemPosition();
-        int previousSize = rawMessages.size();
         if (isGlobalMediaWindowFull()) {
             trimGlobalMediaWindow(true);
         }
-        int removedCount = previousSize - rawMessages.size();
-        updateGlobalMediaResults(globalMediaSearchGeneration);
-        layoutManager.scrollToPositionWithOffset(Math.max(0, firstVisibleRow - removedCount / columnsCount), 0);
+        scheduleGlobalMediaResultsUpdate(globalMediaSearchGeneration);
         startGlobalMediaCacheLoadRound();
         startGlobalMediaDialogBatch(globalMediaSearchGeneration);
     }
@@ -1153,6 +1155,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         globalMediaDialogIds.clear();
         globalMediaMessageIds.clear();
         globalMediaWindowResumeScheduled = false;
+        globalMediaLoadRequestedForGesture = false;
         if (globalMediaResultsUpdateRunnable != null) {
             AndroidUtilities.cancelRunOnUIThread(globalMediaResultsUpdateRunnable);
             globalMediaResultsUpdateRunnable = null;
