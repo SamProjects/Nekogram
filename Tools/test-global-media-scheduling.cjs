@@ -5,7 +5,7 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(path.join(__dirname, '../TMessagesProj/src/main/java/org/telegram/ui/FilteredSearchView.java'), 'utf8');
 const start = source.indexOf('private void startGlobalMediaDialogBatch(int generation) {');
-const end = source.indexOf('private void dispatchGlobalMediaDialogSearches(int generation)', start);
+const end = source.indexOf('\n    private ', start + 1);
 assert.ok(start >= 0 && end > start);
 let body = source.slice(start, end);
 body = body.slice(body.indexOf('{') + 1, body.lastIndexOf('}'))
@@ -22,6 +22,7 @@ const run = new Function('globalMediaDialogSearches', 'inFlight', `
     let finished = false, dispatched = false;
     function onGlobalMediaSyncRoundFinished() { finished = true; }
     function dispatchGlobalMediaDialogSearches() { dispatched = true; }
+    function showGlobalMediaSyncProgress() {}
     (() => { ${body} })();
     return { peers: globalMediaDialogBatch?.map(x => x.dialogId) ?? [], finished, dispatched };
 `);
@@ -71,6 +72,7 @@ const exerciseSkip = new Function('peers', 'list', `
     function updateGlobalMediaTotalCount() {}
     function onGlobalMediaSyncRoundFinished(generation, success) { outcomes.push(success); }
     function dispatchGlobalMediaDialogSearches() { outcomes.push('next'); }
+    function showGlobalMediaSyncProgress() {}
     function finishGlobalMediaNetworkPage(generation, success) { ${methodBody('finishGlobalMediaNetworkPage')} }
     function skipUnavailableGlobalMediaDialog(generation, dialogSearch) { ${methodBody('skipUnavailableGlobalMediaDialog')} }
     skipUnavailableGlobalMediaDialog(1, peers[0]);

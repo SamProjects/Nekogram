@@ -501,6 +501,8 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
                     globalMediaLoadRequestedForGesture = false;
                     AndroidUtilities.hideKeyboard(parentActivity.getCurrentFocus());
+                } else if (newState == RecyclerView.SCROLL_STATE_IDLE) {
+                    maybePrefetchGlobalMedia();
                 }
             }
 
@@ -514,21 +516,12 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 int visibleItemCount = Math.abs(lastVisibleItem - firstVisibleItem) + 1;
                 int totalItemCount = recyclerView.getAdapter().getItemCount();
                 if (globalMediaSearchGeneration != -1 && visibleItemCount > 0
-                        && lastVisibleItem >= totalItemCount - 10 && hasMoreGlobalMediaPages()
-                        && (!isGlobalMediaRoundRunning() || globalMediaSnapshotActive) && dy > 0
-                        && globalMediaScrollState != RecyclerView.SCROLL_STATE_IDLE
-                        && !globalMediaLoadRequestedForGesture) {
-                    globalMediaLoadRequestedForGesture = true;
-                    globalMediaFailurePaused = false;
-                    globalMediaCoverageWaiting = false;
-                    globalMediaEmptyPageAutoLoads = 0;
-                    if (!globalMediaWindowResumeScheduled) {
-                        globalMediaWindowResumeScheduled = true;
-                        AndroidUtilities.runOnUIThread(() -> {
-                            globalMediaWindowResumeScheduled = false;
-                            resumeGlobalMediaWindow();
-                        });
+                        && lastVisibleItem >= totalItemCount - 20 && hasMoreGlobalMediaPages() && dy > 0) {
+                    if (globalMediaScrollState != RecyclerView.SCROLL_STATE_IDLE) {
+                        globalMediaFailurePaused = false;
+                        globalMediaEmptyPageAutoLoads = 0;
                     }
+                    maybePrefetchGlobalMedia();
                 } else if (globalMediaSearchGeneration != -1 && globalMediaNewerHasMore && visibleItemCount > 0
                         && firstVisibleItem <= 10 && dy < 0
                         && (!isGlobalMediaRoundRunning() || globalMediaSnapshotActive)
@@ -1210,6 +1203,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     }
 
     private void applyGlobalMediaDatabasePage(int generation, MessagesStorage.GlobalMediaPage page) {
+        int previousItemCount = adapter == null ? 0 : adapter.getItemCount();
         globalMediaCoverageWaiting = false;
         if (!PhotoViewer.getInstance().isVisible() && globalMediaWindowAnchorMessageId == 0) {
             int firstVisibleRow = layoutManager.findFirstVisibleItemPosition();
@@ -1218,7 +1212,8 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 globalMediaWindowAnchorDialogId = anchor.getDialogId();
                 globalMediaWindowAnchorMessageId = anchor.getId();
                 View anchorView = layoutManager.findViewByPosition(firstVisibleRow);
-                globalMediaWindowAnchorTop = anchorView == null ? 0 : layoutManager.getDecoratedTop(anchorView);
+                globalMediaWindowAnchorTop = anchorView == null ? 0
+                        : layoutManager.getDecoratedTop(anchorView) - recyclerListView.getPaddingTop();
             }
         }
         if (globalMediaPageReplace) {
@@ -1278,7 +1273,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         isLoading = false;
         endReached = !hasMoreGlobalMediaPages();
         updateGlobalMediaTotalCount();
-        updateGlobalMediaResults(generation);
+        updateGlobalMediaResults(generation, previousItemCount);
         if (messages.isEmpty() && endReached && !globalMediaUnavailableDialogs.isEmpty()) {
             globalMediaFailurePaused = true;
             globalMediaLastErrorCode = "MEDIA_CHATS_UNAVAILABLE";
@@ -1300,6 +1295,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             startGlobalMediaHeadRefresh(generation);
         }
         showGlobalMediaUnavailableNotice();
+        maybePrefetchGlobalMedia();
     }
 
     private boolean isGlobalMediaCoverageComplete(int ignoredTargetDate) {
@@ -1515,6 +1511,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 globalMediaPageReplace = false;
                 startGlobalMediaDialogBatch(generation);
             }
+            maybePrefetchGlobalMedia();
             return;
         } else {
             refreshGlobalMediaSnapshotFloors();
@@ -1680,6 +1677,30 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             updateGlobalMediaResults(generation);
         };
         AndroidUtilities.runOnUIThread(globalMediaResultsUpdateRunnable, 200);
+    }
+
+    private void maybePrefetchGlobalMedia() {
+        if (globalMediaSearchGeneration == -1 || !isAttachedToWindow() || globalMediaFailurePaused
+                || isGlobalMediaRoundRunning() || globalMediaWindowResumeScheduled
+                || PhotoViewer.getInstance().isVisible() || messages.isEmpty()
+                || globalMediaEmptyPageAutoLoads >= GLOBAL_MEDIA_EMPTY_PAGE_AUTO_LOAD_LIMIT
+                || !hasMoreGlobalMediaPages()) {
+            return;
+        }
+        int lastVisible = layoutManager.findLastVisibleItemPosition();
+        if (lastVisible < 0 || lastVisible < adapter.getItemCount() - 20) {
+            return;
+        }
+        int generation = globalMediaSearchGeneration;
+        globalMediaWindowResumeScheduled = true;
+        AndroidUtilities.runOnUIThread(() -> {
+            globalMediaWindowResumeScheduled = false;
+            if (generation == requestIndex && generation == globalMediaSearchGeneration
+                    && !globalMediaFailurePaused && !isGlobalMediaRoundRunning()) {
+                globalMediaEmptyPageAutoLoads++;
+                resumeGlobalMediaWindow();
+            }
+        }, GLOBAL_MEDIA_REQUEST_INTERVAL_MS);
     }
 
     private void resumeGlobalMediaWindow() {
@@ -1899,10 +1920,18 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             return;
         }
         isLoading = true;
-        if (messages.isEmpty()) {
-            emptyView.showProgress(true, false);
-        }
+        showGlobalMediaSyncProgress();
         dispatchGlobalMediaDialogSearches(generation);
+    }
+
+    private void showGlobalMediaSyncProgress() {
+        if (messages.isEmpty() && globalMediaDialogBatch != null && isAttachedToWindow()) {
+            emptyView.title.setText(getString(R.string.Loading));
+            emptyView.subtitle.setVisibility(View.VISIBLE);
+            emptyView.subtitle.setText(globalMediaBatchCompleted + " / " + globalMediaDialogBatch.size());
+            emptyView.showProgress(false, false);
+            emptyView.setVisibility(View.VISIBLE);
+        }
     }
 
     private void dispatchGlobalMediaDialogSearches(int generation) {
@@ -2085,6 +2114,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             return;
         }
         globalMediaBatchCompleted++;
+        showGlobalMediaSyncProgress();
         if (globalMediaDialogBatch == null || globalMediaBatchCompleted >= globalMediaDialogBatch.size()) {
             globalMediaDialogBatch = null;
             updateGlobalMediaTotalCount();
@@ -2095,6 +2125,10 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     }
 
     private void updateGlobalMediaResults(int generation) {
+        updateGlobalMediaResults(generation, -1);
+    }
+
+    private void updateGlobalMediaResults(int generation, int previousItemCount) {
         if (generation != requestIndex || generation != globalMediaSearchGeneration) {
             return;
         }
@@ -2105,6 +2139,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             return;
         }
         boolean viewerAppend = PhotoViewer.getInstance().isVisible() && globalMediaViewerLoad;
+        ArrayList<MessageObject> previousMessages = new ArrayList<>(messages);
         int anchorRow = layoutManager.findFirstVisibleItemPosition();
         long anchorDialogId = globalMediaWindowAnchorDialogId;
         int anchorMessageId = globalMediaWindowAnchorMessageId;
@@ -2117,7 +2152,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             anchorMessageId = anchorMessage.getId();
             View anchorView = layoutManager.findViewByPosition(anchorRow);
             if (anchorView != null) {
-                anchorTop = layoutManager.getDecoratedTop(anchorView);
+                anchorTop = layoutManager.getDecoratedTop(anchorView) - recyclerListView.getPaddingTop();
             }
         }
         HashSet<MessageHashId> previouslyVisibleMessages = new HashSet<>();
@@ -2129,6 +2164,13 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         trimGlobalMediaWindow(false);
         rawMessages.sort(this::compareGlobalMediaMessages);
         rebuildVisibleMessages();
+        boolean unchangedPrefix = !previousMessages.isEmpty() && messages.size() >= previousMessages.size();
+        for (int i = 0; unchangedPrefix && i < previousMessages.size(); i++) {
+            MessageObject oldMessage = previousMessages.get(i);
+            MessageObject newMessage = messages.get(i);
+            unchangedPrefix = oldMessage.getId() == newMessage.getId()
+                    && oldMessage.getDialogId() == newMessage.getDialogId();
+        }
         if (PhotoViewer.getInstance().isVisible()) {
             for (MessageObject messageObject : messages) {
                 if (!previouslyVisibleMessages.contains(new MessageHashId(messageObject.getId(), messageObject.getDialogId()))) {
@@ -2149,11 +2191,25 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             }
         }
         if (!viewerAppend) {
-            adapter.notifyDataSetChanged();
+            if (unchangedPrefix && previousItemCount >= 0 && adapter == sharedPhotoVideoAdapter) {
+                int newItemCount = adapter.getItemCount();
+                int firstChangedRow = previousMessages.size() / columnsCount;
+                int commonItemCount = Math.min(previousItemCount, newItemCount);
+                if (firstChangedRow < commonItemCount) {
+                    adapter.notifyItemRangeChanged(firstChangedRow, commonItemCount - firstChangedRow);
+                }
+                if (newItemCount > previousItemCount) {
+                    adapter.notifyItemRangeInserted(previousItemCount, newItemCount - previousItemCount);
+                } else if (newItemCount < previousItemCount) {
+                    adapter.notifyItemRangeRemoved(newItemCount, previousItemCount - newItemCount);
+                }
+            } else {
+                adapter.notifyDataSetChanged();
+            }
         }
-        if (!viewerAppend && anchorMessageId != 0) {
+        if (!viewerAppend && !unchangedPrefix && anchorMessageId != 0) {
             int anchorIndex = findVisibleGlobalMediaMessageIndex(anchorDialogId, anchorMessageId);
-            if (anchorIndex >= 0) {
+            if (anchorIndex >= 0 && anchorIndex / columnsCount != anchorRow) {
                 layoutManager.scrollToPositionWithOffset(anchorIndex / columnsCount, anchorTop);
             }
         }
