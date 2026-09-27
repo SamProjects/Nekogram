@@ -2,6 +2,7 @@
 <resources>
     <string name="MediaFilterTitle">媒体过滤</string>
     <string name="GlobalMediaUnavailableChats">部分会话无法访问，正在显示其他会话的媒体。</string>
+    <string name="GlobalMediaSyncing">正在补齐所有会话的媒体…</string>
     <string name="MediaFilterHidePhotos">隐藏纯图片</string>
     <string name="MediaFilterHideShortVideos">隐藏短视频</string>
     <string name="MediaFilterHideManagedChats">隐藏我管理的群/频道</string>

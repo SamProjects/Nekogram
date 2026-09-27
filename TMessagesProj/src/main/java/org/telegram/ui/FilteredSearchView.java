@@ -180,6 +180,15 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     private int globalMediaWindowAnchorMessageId;
     private int globalMediaWindowAnchorTop;
     private boolean globalMediaWaitingForDialogs;
+    private boolean globalMediaCacheBootstrapStarted;
+    private boolean globalMediaCacheBootstrapFinished;
+    private boolean globalMediaDiscoveryPending;
+    private boolean globalMediaPreviewRequested;
+    private final HashSet<Long> globalMediaPreviewDialogIds = new HashSet<>();
+    private final ArrayList<TLRPC.Message> globalMediaPendingLiveMessages = new ArrayList<>();
+    private final HashSet<MessageHashId> globalMediaPendingLiveIds = new HashSet<>();
+    private Runnable globalMediaLiveMergeRunnable;
+    private TextView globalMediaSyncLabel;
     private boolean globalMediaProgressLoaded;
     private boolean globalMediaProgressLoading;
     private boolean globalMediaPageRequestInFlight;
@@ -599,6 +608,16 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         addView(emptyView);
         recyclerListView.setEmptyView(emptyView);
         emptyView.setVisibility(View.GONE);
+        globalMediaSyncLabel = new TextView(context);
+        globalMediaSyncLabel.setText(getString(R.string.GlobalMediaSyncing));
+        globalMediaSyncLabel.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
+        globalMediaSyncLabel.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 12);
+        globalMediaSyncLabel.setGravity(Gravity.CENTER);
+        globalMediaSyncLabel.setPadding(dp(12), dp(5), dp(12), dp(5));
+        globalMediaSyncLabel.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+        globalMediaSyncLabel.setVisibility(View.GONE);
+        addView(globalMediaSyncLabel, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT,
+                Gravity.TOP | Gravity.CENTER_HORIZONTAL, 0, 6, 0, 0));
         checkUi_floatingDateView();
     }
 
@@ -951,6 +970,9 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         int userMinDate = currentSearchMinDate > 0 ? (int) (currentSearchMinDate / 1000) : 0;
         if (globalMediaDialogSearches != null) {
             for (GlobalMediaDialogSearch dialogSearch : globalMediaDialogSearches) {
+                if (globalMediaSnapshotActive && !globalMediaSnapshotHeadBoundaries.containsKey(dialogSearch.dialogId)) {
+                    continue;
+                }
                 if (!dialogSearch.progressLoaded) {
                     return true;
                 }
@@ -974,13 +996,13 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     }
 
     private ArrayList<Long> getGlobalMediaDialogIds() {
-        ArrayList<Long> dialogIds = new ArrayList<>();
+        HashSet<Long> ids = new HashSet<>(globalMediaPreviewDialogIds);
         if (globalMediaDialogSearches != null) {
             for (GlobalMediaDialogSearch dialogSearch : globalMediaDialogSearches) {
-                dialogIds.add(dialogSearch.dialogId);
+                ids.add(dialogSearch.dialogId);
             }
         }
-        return dialogIds;
+        return new ArrayList<>(ids);
     }
 
     private MessagesStorage.GlobalMediaSearchProgress copyGlobalMediaProgress(MessagesStorage.GlobalMediaSearchProgress source) {
@@ -1013,9 +1035,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             }
         }
         if (idsToLoad.isEmpty()) {
-            globalMediaProgressLoaded = true;
-            refreshGlobalMediaSnapshotBounds();
-            requestGlobalMediaDatabasePage(generation, false, true);
+            onGlobalMediaProgressReady(generation);
             return;
         }
         globalMediaProgressLoading = true;
@@ -1040,7 +1060,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 boolean headIsStale = !progress.initialized || progress.lastHeadSyncAt <= 0
                         || now < progress.lastHeadSyncAt || now - progress.lastHeadSyncAt >= GLOBAL_MEDIA_HEAD_STALENESS_MS;
                 dialogSearch.refreshHead = progress.initialized && headIsStale && !progress.catchingUp;
-                globalMediaHeadRefreshPending |= dialogSearch.refreshHead || progress.catchingUp;
+                globalMediaHeadRefreshPending |= !progress.initialized || dialogSearch.refreshHead || progress.catchingUp;
                 dialogSearch.progressLoaded = true;
                 dialogSearch.failed = false;
                 dialogSearch.historyEndReached = progress.historyEndReached;
@@ -1049,11 +1069,29 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 dialogSearch.pendingGroupKey = progress.catchingUp ? dialogSearch.historyPendingGroupKey : null;
                 dialogSearch.endReached = progress.historyEndReached && !progress.catchingUp;
             }
-            globalMediaProgressLoaded = true;
-            globalMediaFailurePaused = false;
-            refreshGlobalMediaSnapshotBounds();
-            requestGlobalMediaDatabasePage(generation, false, true);
+            onGlobalMediaProgressReady(generation);
         });
+    }
+
+    private void onGlobalMediaProgressReady(int generation) {
+        globalMediaProgressLoaded = true;
+        globalMediaFailurePaused = false;
+        if (!globalMediaSnapshotActive) {
+            refreshGlobalMediaSnapshotBounds();
+        }
+        boolean dialogsReady = MessagesController.getInstance(globalMediaSearchAccount)
+                .isServerDialogsEndReached(globalMediaSearchFolder);
+        if (rawMessages.isEmpty()) {
+            requestGlobalMediaDatabasePage(generation, false, true);
+        } else if (globalMediaSnapshotActive || dialogsReady) {
+            startGlobalMediaHeadRefresh(generation);
+        }
+        if (!dialogsReady) {
+            continueGlobalMediaSearch(generation);
+        }
+        if (!globalMediaSnapshotActive && !dialogsReady) {
+            startGlobalMediaDialogBatch(generation);
+        }
     }
 
     private void refreshGlobalMediaSnapshotBounds() {
@@ -1061,13 +1099,14 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         globalMediaSnapshotFloors.clear();
         globalMediaSnapshotHistoryEnded.clear();
         globalMediaSnapshotPendingGroupKeys.clear();
-        boolean canUseSnapshot = globalMediaProgressLoaded && globalMediaDialogSearches != null;
+        boolean canUseSnapshot = false;
         for (GlobalMediaDialogSearch dialogSearch : globalMediaDialogSearches) {
             MessagesStorage.GlobalMediaSearchProgress progress = dialogSearch.progress;
             if (!dialogSearch.progressLoaded || !progress.initialized
                     || (!progress.historyEndReached && progress.headFloorDate <= 0)) {
-                canUseSnapshot = false;
+                continue;
             }
+            canUseSnapshot |= progress.headBoundaryId > 0;
             globalMediaSnapshotHeadBoundaries.put(dialogSearch.dialogId, progress.headBoundaryId);
             globalMediaSnapshotFloors.put(dialogSearch.dialogId, progress.headFloorDate);
             if (progress.historyEndReached) {
@@ -1091,7 +1130,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         globalMediaFailurePaused = false;
         globalMediaPageNewer = newer;
         globalMediaPageReplace = replace;
-        if (!isGlobalMediaCoverageComplete(0)) {
+        if (!replace && !isGlobalMediaCoverageComplete(0)) {
             globalMediaCoverageWaiting = true;
             startGlobalMediaDialogBatch(generation);
             return;
@@ -1131,14 +1170,14 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             emptyView.showProgress(true, false);
         }
         final int token = ++globalMediaPageRequestToken;
-        int minDate = getGlobalMediaEffectiveMinDate();
-        HashMap<Long, Integer> snapshotBounds = globalMediaSnapshotActive
-                ? new HashMap<>(globalMediaSnapshotHeadBoundaries) : null;
+        // Cached and preview rows are deliberately visible before every peer has
+        // been covered. Coverage still governs deeper network history scanning.
+        int minDate = currentSearchMinDate > 0 ? (int) (currentSearchMinDate / 1000) : 0;
         MessagesStorage.getInstance(globalMediaSearchAccount).loadGlobalMediaPage(
                 getGlobalMediaDialogIds(), MediaDataController.MEDIA_PHOTOVIDEO,
                 minDate,
                 currentSearchMaxDate > 0 ? (int) (currentSearchMaxDate / 1000) : 0,
-                GLOBAL_MEDIA_REFRESH_BATCH_SIZE, cursorDate, cursorDialogId, cursorMessageId, newer, snapshotBounds,
+                GLOBAL_MEDIA_REFRESH_BATCH_SIZE, cursorDate, cursorDialogId, cursorMessageId, newer, null,
                 page -> onGlobalMediaDatabasePage(generation, token, page));
     }
 
@@ -1274,6 +1313,9 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         endReached = !hasMoreGlobalMediaPages();
         updateGlobalMediaTotalCount();
         updateGlobalMediaResults(generation, previousItemCount);
+        if (messages.isEmpty() && !globalMediaPreviewRequested) {
+            requestGlobalMediaPreview(generation);
+        }
         if (messages.isEmpty() && endReached && !globalMediaUnavailableDialogs.isEmpty()) {
             globalMediaFailurePaused = true;
             globalMediaLastErrorCode = "MEDIA_CHATS_UNAVAILABLE";
@@ -1295,6 +1337,9 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             startGlobalMediaHeadRefresh(generation);
         }
         showGlobalMediaUnavailableNotice();
+        if (globalMediaDiscoveryPending) {
+            continueGlobalMediaSearch(generation);
+        }
         maybePrefetchGlobalMedia();
     }
 
@@ -1302,7 +1347,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         if (!globalMediaProgressLoaded || globalMediaDialogSearches == null) {
             return false;
         }
-        if (globalMediaSnapshotActive && globalMediaSnapshotHeadBoundaries.size() == globalMediaDialogSearches.size()) {
+        if (globalMediaSnapshotActive) {
             return true;
         }
         for (GlobalMediaDialogSearch dialogSearch : globalMediaDialogSearches) {
@@ -1354,9 +1399,9 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         return Math.max(userMinDate, frontier);
     }
 
-    private void mergeGlobalMediaGroupContext(ArrayList<TLRPC.Message> groupMessages) {
+    private boolean mergeGlobalMediaGroupContext(ArrayList<TLRPC.Message> groupMessages) {
         if (groupMessages == null || groupMessages.isEmpty()) {
-            return;
+            return false;
         }
         HashSet<String> visibleGroupKeys = new HashSet<>();
         for (MessageObject messageObject : rawMessages) {
@@ -1377,6 +1422,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             ArrayList<MessageObject> group = incoming.computeIfAbsent(key, unused -> new ArrayList<>());
             group.add(new MessageObject(globalMediaSearchAccount, message, false, true));
         }
+        boolean changed = false;
         for (String key : incoming.keySet()) {
             ArrayList<MessageObject> all = globalMediaGroupContext.computeIfAbsent(key, unused -> new ArrayList<>());
             HashSet<MessageHashId> seen = new HashSet<>();
@@ -1387,9 +1433,11 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 MessageHashId hash = new MessageHashId(item.getId(), item.getDialogId());
                 if (seen.add(hash)) {
                     all.add(item);
+                    changed = true;
                 }
             }
         }
+        return changed;
     }
 
     private void pruneGlobalMediaGroupContext() {
@@ -1511,6 +1559,9 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 globalMediaPageReplace = false;
                 startGlobalMediaDialogBatch(generation);
             }
+            if (globalMediaDiscoveryPending) {
+                continueGlobalMediaSearch(generation);
+            }
             maybePrefetchGlobalMedia();
             return;
         } else {
@@ -1535,7 +1586,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 progress.pendingHeadBoundaryId = 0;
                 dialogSearch.pendingGroupKey = null;
                 hasHeadWork = true;
-            } else if (progress.catchingUp) {
+            } else if (!progress.initialized || progress.catchingUp) {
                 hasHeadWork = true;
             }
             dialogSearch.refreshHead = false;
@@ -1555,6 +1606,9 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         }
         globalMediaSnapshotPendingGroupKeys.clear();
         for (GlobalMediaDialogSearch dialogSearch : globalMediaDialogSearches) {
+            if (!globalMediaSnapshotHeadBoundaries.containsKey(dialogSearch.dialogId)) {
+                continue;
+            }
             MessagesStorage.GlobalMediaSearchProgress progress = dialogSearch.progress;
             if (progress.historyEndReached) {
                 globalMediaSnapshotHistoryEnded.add(dialogSearch.dialogId);
@@ -1834,6 +1888,18 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         globalMediaBatchCompleted = 0;
         globalMediaRequestsInFlight = 0;
         globalMediaWaitingForDialogs = false;
+        globalMediaCacheBootstrapStarted = false;
+        globalMediaCacheBootstrapFinished = false;
+        globalMediaDiscoveryPending = false;
+        globalMediaPreviewRequested = false;
+        globalMediaPreviewDialogIds.clear();
+        globalMediaPendingLiveMessages.clear();
+        globalMediaPendingLiveIds.clear();
+        if (globalMediaLiveMergeRunnable != null) {
+            AndroidUtilities.cancelRunOnUIThread(globalMediaLiveMergeRunnable);
+            globalMediaLiveMergeRunnable = null;
+        }
+        updateGlobalMediaSyncLabel();
     }
 
     private void ensureGlobalMediaAdapter() {
@@ -1852,9 +1918,50 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             return;
         }
         MessagesController messagesController = MessagesController.getInstance(globalMediaSearchAccount);
+        if (!globalMediaCacheBootstrapFinished) {
+            if (!globalMediaCacheBootstrapStarted) {
+                globalMediaCacheBootstrapStarted = true;
+                globalMediaProgressLoading = true;
+                MessagesStorage.getInstance(globalMediaSearchAccount).loadGlobalMediaCachedDialogs(globalMediaSearchFolder, cached -> {
+                    if (generation != requestIndex || generation != globalMediaSearchGeneration) return;
+                    globalMediaProgressLoading = false;
+                    globalMediaCacheBootstrapFinished = true;
+                    messagesController.putUsers(cached.users, true);
+                    messagesController.putChats(cached.chats, true);
+                    if (globalMediaDialogSearches == null) globalMediaDialogSearches = new ArrayList<>();
+                    for (Long dialogId : cached.dialogIds) {
+                        globalMediaPreviewDialogIds.add(dialogId);
+                        TLRPC.InputPeer peer = messagesController.getInputPeer(dialogId);
+                        if (peer != null && !(peer instanceof TLRPC.TL_inputPeerEmpty) && globalMediaDialogIds.add(dialogId)) {
+                            globalMediaDialogSearches.add(new GlobalMediaDialogSearch(dialogId, peer));
+                        }
+                    }
+                    if (globalMediaDialogSearches.isEmpty()) {
+                        globalMediaProgressLoaded = true;
+                        requestGlobalMediaDatabasePage(generation, false, true);
+                        continueGlobalMediaSearch(generation);
+                    } else {
+                        globalMediaDiscoveryPending = true;
+                        loadGlobalMediaProgress(generation);
+                    }
+                });
+            }
+            return;
+        }
         if (!messagesController.isServerDialogsEndReached(globalMediaSearchFolder)) {
             globalMediaWaitingForDialogs = true;
             appendGlobalMediaDialogs(messagesController);
+            updateGlobalMediaSyncLabel();
+            if (!globalMediaProgressLoading && globalMediaDialogBatch == null
+                    && globalMediaRequestsInFlight == 0 && !globalMediaPageRequestInFlight
+                    && globalMediaPendingPage == null) {
+                for (GlobalMediaDialogSearch dialogSearch : globalMediaDialogSearches) {
+                    if (!dialogSearch.progressLoaded) {
+                        loadGlobalMediaProgress(generation);
+                        break;
+                    }
+                }
+            }
             if (!messagesController.isLoadingDialogs(globalMediaSearchFolder)) {
                 messagesController.loadDialogs(globalMediaSearchFolder, 0, 100, false);
             }
@@ -1862,23 +1969,29 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         }
 
         globalMediaWaitingForDialogs = false;
+        updateGlobalMediaSyncLabel();
         appendGlobalMediaDialogs(messagesController);
+        if (globalMediaPageRequestInFlight || globalMediaPendingPage != null || globalMediaProgressLoading
+                || globalMediaDialogBatch != null || globalMediaHeadRefreshRunning) {
+            globalMediaDiscoveryPending = true;
+            return;
+        }
+        globalMediaDiscoveryPending = false;
         boolean allLoaded = true;
         for (GlobalMediaDialogSearch dialogSearch : globalMediaDialogSearches) {
             allLoaded &= dialogSearch.progressLoaded;
         }
         if (allLoaded) {
             globalMediaProgressLoaded = true;
-            refreshGlobalMediaSnapshotBounds();
             long now = System.currentTimeMillis();
             for (GlobalMediaDialogSearch dialogSearch : globalMediaDialogSearches) {
                 MessagesStorage.GlobalMediaSearchProgress progress = dialogSearch.progress;
                 boolean stale = !progress.initialized || progress.lastHeadSyncAt <= 0
                         || now < progress.lastHeadSyncAt || now - progress.lastHeadSyncAt >= GLOBAL_MEDIA_HEAD_STALENESS_MS;
                 dialogSearch.refreshHead = progress.initialized && stale && !progress.catchingUp;
-                globalMediaHeadRefreshPending |= dialogSearch.refreshHead || progress.catchingUp;
+                globalMediaHeadRefreshPending |= !progress.initialized || dialogSearch.refreshHead || progress.catchingUp;
             }
-            requestGlobalMediaDatabasePage(generation, false, true);
+            onGlobalMediaProgressReady(generation);
         } else {
             globalMediaProgressLoaded = false;
             loadGlobalMediaProgress(generation);
@@ -1958,6 +2071,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     }
 
     private void showGlobalMediaSyncProgress() {
+        updateGlobalMediaSyncLabel();
         if (messages.isEmpty() && globalMediaDialogBatch != null && isAttachedToWindow()) {
             emptyView.title.setText(getString(R.string.Loading));
             emptyView.subtitle.setVisibility(View.VISIBLE);
@@ -1965,6 +2079,151 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             emptyView.showProgress(false, false);
             emptyView.setVisibility(View.VISIBLE);
         }
+    }
+
+    private void requestGlobalMediaPreview(int generation) {
+        if (globalMediaPreviewRequested || generation != requestIndex || generation != globalMediaSearchGeneration) {
+            return;
+        }
+        globalMediaPreviewRequested = true;
+        TLRPC.TL_messages_searchGlobal request = new TLRPC.TL_messages_searchGlobal();
+        request.q = "";
+        request.limit = 20;
+        request.filter = new TLRPC.TL_inputMessagesFilterPhotoVideo();
+        request.community = MessagesController.getInstance(globalMediaSearchAccount).getInputChannel(0);
+        request.offset_peer = new TLRPC.TL_inputPeerEmpty();
+        request.flags |= 1;
+        request.folder_id = globalMediaSearchFolder;
+        final int[] requestIdHolder = new int[]{-1};
+        int requestId = ConnectionsManager.getInstance(globalMediaSearchAccount).sendRequest(request,
+                (response, error) -> AndroidUtilities.runOnUIThread(() -> {
+                    if (requestIdHolder[0] >= 0) {
+                        globalMediaRequestIds.remove((Integer) requestIdHolder[0]);
+                    }
+                    if (generation != requestIndex || generation != globalMediaSearchGeneration
+                            || error != null || !(response instanceof TLRPC.messages_Messages)) {
+                        return;
+                    }
+                    TLRPC.messages_Messages result = (TLRPC.messages_Messages) response;
+                    MessagesController controller = MessagesController.getInstance(globalMediaSearchAccount);
+                    controller.putUsers(result.users, false);
+                    controller.putChats(result.chats, false);
+                    MessagesStorage storage = MessagesStorage.getInstance(globalMediaSearchAccount);
+                    storage.putUsersAndChats(result.users, result.chats, true, true);
+                    HashMap<Long, ArrayList<TLRPC.Message>> byDialog = new HashMap<>();
+                    for (TLRPC.Message message : result.messages) {
+                        if (message == null || message.id <= 0) continue;
+                        long dialogId = MessageObject.getPeerId(message.peer_id);
+                        if (dialogId == 0 || DialogObject.isEncryptedDialog(dialogId)) continue;
+                        message.dialog_id = dialogId;
+                        byDialog.computeIfAbsent(dialogId, ignored -> new ArrayList<>()).add(message);
+                    }
+                    ArrayList<Long> peers = new ArrayList<>(byDialog.keySet());
+                    globalMediaPreviewDialogIds.addAll(peers);
+                    storage.rememberGlobalMediaPreviewPeers(globalMediaSearchFolder, peers);
+                    for (Long dialogId : peers) {
+                        ArrayList<TLRPC.Message> peerMessages = byDialog.get(dialogId);
+                        controller.removeDeletedMessagesFromArray(dialogId, peerMessages);
+                        storage.putGlobalMediaSearchMessages(peerMessages, dialogId, null, stored -> {
+                            if (stored && generation == requestIndex && generation == globalMediaSearchGeneration) {
+                                storage.loadGlobalMediaStoredMessages(peerMessages,
+                                        page -> queueGlobalMediaStoredPage(generation, page));
+                            }
+                        });
+                    }
+                }));
+        requestIdHolder[0] = requestId;
+        globalMediaRequestIds.add(requestId);
+    }
+
+    private void queueGlobalMediaStoredPage(int generation, MessagesStorage.GlobalMediaPage page) {
+        if (generation != requestIndex || generation != globalMediaSearchGeneration
+                || page == null || page.failed) return;
+        MessagesController controller = MessagesController.getInstance(globalMediaSearchAccount);
+        controller.putUsers(page.users, true);
+        controller.putChats(page.chats, true);
+        queueGlobalMediaLiveMessages(generation, page.groupMessages);
+    }
+
+    private void queueGlobalMediaLiveMessages(int generation, ArrayList<TLRPC.Message> incoming) {
+        if (generation != requestIndex || generation != globalMediaSearchGeneration
+                || incoming == null || incoming.isEmpty()) {
+            return;
+        }
+        for (TLRPC.Message message : incoming) {
+            if (message == null || message.dialog_id == 0 || message.id <= 0) continue;
+            MessageHashId id = new MessageHashId(message.id, message.dialog_id);
+            if (globalMediaPendingLiveIds.add(id)) {
+                globalMediaPendingLiveMessages.add(message);
+            }
+        }
+        if (globalMediaPendingLiveMessages.size() > GLOBAL_MEDIA_WINDOW_SIZE) {
+            globalMediaPendingLiveMessages.sort((left, right) -> {
+                int date = Integer.compare(right.date, left.date);
+                if (date != 0) return date;
+                int dialog = Long.compare(right.dialog_id, left.dialog_id);
+                return dialog != 0 ? dialog : Integer.compare(right.id, left.id);
+            });
+            globalMediaPendingLiveMessages.subList(GLOBAL_MEDIA_WINDOW_SIZE, globalMediaPendingLiveMessages.size()).clear();
+            globalMediaPendingLiveIds.clear();
+            for (TLRPC.Message message : globalMediaPendingLiveMessages) {
+                globalMediaPendingLiveIds.add(new MessageHashId(message.id, message.dialog_id));
+            }
+        }
+        if (globalMediaLiveMergeRunnable != null) return;
+        globalMediaLiveMergeRunnable = () -> {
+            if (generation != requestIndex || generation != globalMediaSearchGeneration) {
+                globalMediaPendingLiveMessages.clear();
+                globalMediaPendingLiveIds.clear();
+                globalMediaLiveMergeRunnable = null;
+                return;
+            }
+            if (globalMediaScrollState != RecyclerView.SCROLL_STATE_IDLE || PhotoViewer.getInstance().isVisible()
+                    || globalMediaPendingPage != null || globalMediaPageRequestInFlight) {
+                AndroidUtilities.runOnUIThread(globalMediaLiveMergeRunnable, 150);
+                return;
+            }
+            globalMediaLiveMergeRunnable = null;
+            ArrayList<TLRPC.Message> pending = new ArrayList<>(globalMediaPendingLiveMessages);
+            globalMediaPendingLiveMessages.clear();
+            globalMediaPendingLiveIds.clear();
+            int previousItemCount = adapter == null ? 0 : adapter.getItemCount();
+            MessageObject initialOldest = rawMessages.isEmpty() ? null : rawMessages.get(rawMessages.size() - 1);
+            MessageObject initialNewest = rawMessages.isEmpty() ? null : rawMessages.get(0);
+            boolean initialWindowFull = rawMessages.size() >= GLOBAL_MEDIA_WINDOW_SIZE;
+            boolean changed = false;
+            for (TLRPC.Message message : pending) {
+                if (message == null || message.dialog_id == 0 || message.id <= 0) continue;
+                MessageObject item = new MessageObject(globalMediaSearchAccount, message, false, true);
+                if (!isInCurrentGlobalMediaDateRange(item)) continue;
+                MessageHashId id = new MessageHashId(item.getId(), item.getDialogId());
+                if (globalMediaMessageIds.contains(id)) continue;
+                if (initialWindowFull && initialOldest != null
+                        && compareGlobalMediaMessages(item, initialOldest) > 0) {
+                    continue; // Persisted: the older seek page will find it when needed.
+                }
+                if (globalMediaNewerHasMore && initialNewest != null
+                        && compareGlobalMediaMessages(item, initialNewest) < 0) {
+                    continue; // Persisted: the newer seek page will find it when needed.
+                }
+                if (globalMediaMessageIds.add(id)) {
+                    item.setQuery("");
+                    rawMessages.add(item);
+                    changed = true;
+                }
+            }
+            boolean contextChanged = mergeGlobalMediaGroupContext(pending);
+            if (changed || contextChanged) {
+                rawMessages.sort(this::compareGlobalMediaMessages);
+                updateGlobalMediaResults(generation, previousItemCount);
+                // Live rows are not a contiguous seek page. Never move an older
+                // cursor to their date, or intervening cached rows would be skipped.
+                if (globalMediaOlderCursorDate == 0) {
+                    requestGlobalMediaDatabasePage(generation, false, true);
+                }
+            }
+        };
+        AndroidUtilities.runOnUIThread(globalMediaLiveMergeRunnable, 250);
     }
 
     private void dispatchGlobalMediaDialogSearches(int generation) {
@@ -2105,6 +2364,8 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                                 dialogSearch.historyPendingGroupKey = newPendingGroup;
                             }
                             dialogSearch.pendingGroupKey = after.catchingUp ? newPendingGroup : dialogSearch.historyPendingGroupKey;
+                            storage.loadGlobalMediaStoredMessages(result.messages,
+                                    page -> queueGlobalMediaStoredPage(generation, page));
                         } else {
                             globalMediaLastErrorCode = "LOCAL_MEDIA_WRITE_FAILED";
                         }
@@ -2150,11 +2411,20 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         showGlobalMediaSyncProgress();
         if (globalMediaDialogBatch == null || globalMediaBatchCompleted >= globalMediaDialogBatch.size()) {
             globalMediaDialogBatch = null;
+            updateGlobalMediaSyncLabel();
             updateGlobalMediaTotalCount();
             onGlobalMediaSyncRoundFinished(generation, true);
         } else {
             dispatchGlobalMediaDialogSearches(generation);
         }
+    }
+
+    private void updateGlobalMediaSyncLabel() {
+        if (globalMediaSyncLabel == null) return;
+        boolean syncing = globalMediaSearchGeneration != -1 && (globalMediaWaitingForDialogs
+                || globalMediaDialogBatch != null || globalMediaRequestsInFlight != 0
+                || globalMediaHeadRefreshPending || globalMediaHeadRefreshRunning || globalMediaCoverageWaiting);
+        globalMediaSyncLabel.setVisibility(syncing ? View.VISIBLE : View.GONE);
     }
 
     private void updateGlobalMediaResults(int generation) {
@@ -2204,6 +2474,13 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             unchangedPrefix = oldMessage.getId() == newMessage.getId()
                     && oldMessage.getDialogId() == newMessage.getDialogId();
         }
+        boolean sameVisibleIds = previousMessages.size() == messages.size();
+        for (int i = 0; sameVisibleIds && i < messages.size(); i++) {
+            MessageObject oldMessage = previousMessages.get(i);
+            MessageObject newMessage = messages.get(i);
+            sameVisibleIds = oldMessage.getId() == newMessage.getId()
+                    && oldMessage.getDialogId() == newMessage.getDialogId();
+        }
         if (PhotoViewer.getInstance().isVisible()) {
             for (MessageObject messageObject : messages) {
                 if (!previouslyVisibleMessages.contains(new MessageHashId(messageObject.getId(), messageObject.getDialogId()))) {
@@ -2223,7 +2500,8 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 emptyView.subtitle.setText(getString(R.string.SearchEmptyViewFilteredSubtitle2));
             }
         }
-        if (!viewerAppend) {
+        if (!viewerAppend && (!sameVisibleIds || previousItemCount >= 0
+                && adapter.getItemCount() != previousItemCount)) {
             if (unchangedPrefix && previousItemCount >= 0 && adapter == sharedPhotoVideoAdapter) {
                 int newItemCount = adapter.getItemCount();
                 int firstChangedRow = previousMessages.size() / columnsCount;
@@ -3448,6 +3726,8 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             startGlobalMediaHeadRefresh(globalMediaSearchGeneration);
         } else if (globalMediaCoverageWaiting && globalMediaSearchGeneration == requestIndex) {
             startGlobalMediaDialogBatch(globalMediaSearchGeneration);
+        } else if (globalMediaProgressLoaded && rawMessages.isEmpty() && globalMediaSearchGeneration == requestIndex) {
+            requestGlobalMediaDatabasePage(globalMediaSearchGeneration, false, true);
         }
     }
 

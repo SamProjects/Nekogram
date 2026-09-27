@@ -23,6 +23,7 @@ const run = new Function('globalMediaDialogSearches', 'inFlight', `
     function onGlobalMediaSyncRoundFinished() { finished = true; }
     function dispatchGlobalMediaDialogSearches() { dispatched = true; }
     function showGlobalMediaSyncProgress() {}
+    function updateGlobalMediaSyncLabel() {}
     (() => { ${body} })();
     return { peers: globalMediaDialogBatch?.map(x => x.dialogId) ?? [], finished, dispatched };
 `);
@@ -73,6 +74,7 @@ const exerciseSkip = new Function('peers', 'list', `
     function onGlobalMediaSyncRoundFinished(generation, success) { outcomes.push(success); }
     function dispatchGlobalMediaDialogSearches() { outcomes.push('next'); }
     function showGlobalMediaSyncProgress() {}
+    function updateGlobalMediaSyncLabel() {}
     function finishGlobalMediaNetworkPage(generation, success) { ${methodBody('finishGlobalMediaNetworkPage')} }
     function skipUnavailableGlobalMediaDialog(generation, dialogSearch) { ${methodBody('skipUnavailableGlobalMediaDialog')} }
     skipUnavailableGlobalMediaDialog(1, peers[0]);
@@ -141,3 +143,53 @@ for (const columns of [3, 6]) {
     }
 }
 console.log('PASS: complete visible-row eviction with filtered and unfiltered 3/6-column grids');
+
+const snapshot = new Function('globalMediaDialogSearches', `
+    const globalMediaSnapshotHeadBoundaries = new Map(), globalMediaSnapshotFloors = new Map();
+    const globalMediaSnapshotHistoryEnded = new Set(), globalMediaSnapshotPendingGroupKeys = new Set();
+    let globalMediaSnapshotActive = false;
+    (() => { ${methodBody('refreshGlobalMediaSnapshotBounds')
+        .replace(/boolean canUseSnapshot/g, 'let canUseSnapshot')
+        .replace(/canUseSnapshot \|=/g, 'canUseSnapshot ||=')
+        .replace(/for \(GlobalMediaDialogSearch dialogSearch : globalMediaDialogSearches\)/g, 'for (const dialogSearch of globalMediaDialogSearches)')
+        .replace(/MessagesStorage\.GlobalMediaSearchProgress progress/g, 'const progress')
+        .replace(/\.put\(/g, '.set(')} })();
+    return { active: globalMediaSnapshotActive, ids: [...globalMediaSnapshotHeadBoundaries.keys()] };
+`);
+const cachedPeer = peer(1, 200, { headBoundaryId: 80, pendingGroupId: 0 });
+cachedPeer.progressLoaded = true;
+const unknownPeer = peer(2, 0, { initialized: false, headBoundaryId: 0, pendingGroupId: 0 });
+unknownPeer.progressLoaded = true;
+assert.deepEqual(snapshot([cachedPeer, unknownPeer]), { active: true, ids: [1] }, 'One unknown peer must not block a valid cached snapshot');
+assert.deepEqual(snapshot([unknownPeer]), { active: false, ids: [] });
+const emptyPeer = peer(3, 0, { historyEndReached: true, headBoundaryId: 0, pendingGroupId: 0 });
+emptyPeer.progressLoaded = true;
+assert.equal(snapshot([emptyPeer, unknownPeer]).active, false, 'Empty checkpoints must not freeze the first actual media sync');
+const cacheReady = new Function('cached', 'dialogsReady', 'visible', `
+    let globalMediaProgressLoaded = false, globalMediaFailurePaused = true;
+    let globalMediaSnapshotActive = cached, globalMediaSearchAccount = 0, globalMediaSearchFolder = 0;
+    const rawMessages = { isEmpty: () => !visible }, calls = [], generation = 1;
+    const MessagesController = { getInstance: () => ({ isServerDialogsEndReached: () => dialogsReady }) };
+    function refreshGlobalMediaSnapshotBounds() {}
+    function requestGlobalMediaDatabasePage() { calls.push('cache'); }
+    function startGlobalMediaHeadRefresh() { calls.push('refresh'); }
+    function continueGlobalMediaSearch() { calls.push('discover'); }
+    function startGlobalMediaDialogBatch() { calls.push('batch'); }
+    (() => { ${methodBody('onGlobalMediaProgressReady').replace(/boolean dialogsReady/g, 'const dialogsReady')} })();
+    return calls;
+`);
+assert.deepEqual(cacheReady(true, false, false), ['cache', 'discover'], 'Cache must display before server dialog discovery completes');
+assert.deepEqual(cacheReady(false, false, false), ['cache', 'discover', 'batch'], 'Without cache, read available rows and start scanning known peers');
+assert.deepEqual(cacheReady(true, true, true), ['refresh'], 'Background discovery must not replace visible cached rows');
+console.log('PASS: cache-first startup and partial valid snapshots without visible-list replacement');
+
+const liveStart = source.indexOf('private void queueGlobalMediaLiveMessages(');
+const liveEnd = source.indexOf('\n    private ', liveStart + 1);
+const liveSource = source.slice(liveStart, liveEnd);
+assert.ok(liveSource.includes('globalMediaPendingLiveMessages.size() > GLOBAL_MEDIA_WINDOW_SIZE'), 'Pending network rows must be bounded');
+assert.ok(liveSource.includes('globalMediaScrollState != RecyclerView.SCROLL_STATE_IDLE')
+    && liveSource.includes('PhotoViewer.getInstance().isVisible()'), 'Merge must wait while dragging or viewing a photo');
+assert.ok(!/globalMediaOlderCursorDate\s*=(?!=)/.test(liveSource), 'Sparse live results must never advance the older DB cursor');
+assert.ok(source.includes('if (!viewerAppend && (!sameVisibleIds'), 'Duplicate batches must not redraw the media grid');
+assert.ok(source.includes('storage.loadGlobalMediaStoredMessages(result.messages'), 'Per-peer updates must read persisted rows before display');
+console.log('PASS: bounded and deferred DB-backed live merge, unchanged-grid suppression and stable seek cursor');

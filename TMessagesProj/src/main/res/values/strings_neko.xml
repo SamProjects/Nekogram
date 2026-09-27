@@ -5,6 +5,7 @@
     <string name="NekogramBeta" translatable="false">MediaGroupGram Beta</string>
     <string name="MediaFilterTitle">Media filter</string>
     <string name="GlobalMediaUnavailableChats">Some chats cannot be accessed. Showing media from the other chats.</string>
+    <string name="GlobalMediaSyncing">Filling in media from all chats…</string>
     <string name="MediaFilterHidePhotos">Hide photo-only media</string>
     <string name="MediaFilterHideShortVideos">Hide short videos</string>
     <string name="MediaFilterHideManagedChats">Hide groups/channels I manage</string>

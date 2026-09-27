@@ -143,5 +143,22 @@ db.exec('ROLLBACK TO global_media_page; RELEASE global_media_page');
 assert.equal(db.prepare('SELECT COUNT(*) AS n FROM messages_v2 WHERE mid=50001').get().n, 0);
 assert.equal(db.prepare('SELECT COUNT(*) AS n FROM media_v4 WHERE mid=50001').get().n, 0);
 assert.equal(db.prepare('SELECT COUNT(*) AS n FROM global_media_search_state').get().n, 0);
+// A restarted controller need not have any in-memory dialogs: discover persisted
+// media peers directly, respecting archive membership and deleted dialogs.
+db.exec('CREATE TABLE dialogs(did INTEGER PRIMARY KEY, date INTEGER, folder_id INTEGER)');
+db.exec('CREATE TABLE global_media_preview_peers(uid INTEGER, folder_id INTEGER, PRIMARY KEY(uid, folder_id))');
+db.exec('INSERT INTO dialogs VALUES(-101,300,0),(-202,200,1),(-303,100,0),(-404,50,0)');
+for (const [uid, initialized, version] of [[-101,1,1],[-202,1,1],[-303,0,1],[-404,1,0],[-999,1,1]]) {
+    insertProgress.run(uid, version, initialized, 1, 10, recent, 1, 0, 0, 0, 0, 0);
+}
+const bootstrapMethod = source.slice(source.indexOf('public void loadGlobalMediaCachedDialogs('), source.indexOf('private void ensureGlobalMediaSearchTables('));
+const bootstrapExpr = bootstrapMethod.match(/cursor = database\.queryFinalized\(([^;]+)\);/)[1];
+const bootstrapSelect = new Function('folderId', 'GlobalMediaSearchProgress', `return ${bootstrapExpr};`);
+assert.deepEqual(db.prepare(bootstrapSelect(0, { VERSION: 1 })).all().map(x => x.uid), [-101]);
+assert.deepEqual(db.prepare(bootstrapSelect(1, { VERSION: 1 })).all().map(x => x.uid), [-202]);
+db.exec('INSERT INTO global_media_preview_peers VALUES(-505,0),(-606,1)');
+assert.deepEqual(db.prepare(bootstrapSelect(0, { VERSION: 1 })).all().map(x => x.uid).sort(), [-101,-505]);
+assert.deepEqual(db.prepare(bootstrapSelect(1, { VERSION: 1 })).all().map(x => x.uid).sort(), [-202,-606]);
 db.close();
+console.log('PASS: persistent media peer discovery without network, folder isolation and checkpoint version filtering');
 console.log('PASS: production SQL, global ordering, equal-second ties, coverage cutoff, date range, bidirectional readback, insert/delete-stable cursors, cache rollback and local-state preservation');

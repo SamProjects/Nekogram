@@ -11344,14 +11344,88 @@ public class MessagesStorage extends BaseController {
         void onLoaded(GlobalMediaPage page);
     }
 
+    public static class GlobalMediaCachedDialogs {
+        public final ArrayList<Long> dialogIds = new ArrayList<>();
+        public final ArrayList<TLRPC.User> users = new ArrayList<>();
+        public final ArrayList<TLRPC.Chat> chats = new ArrayList<>();
+    }
+
+    public void loadGlobalMediaCachedDialogs(int folderId, Consumer<GlobalMediaCachedDialogs> callback) {
+        storageQueue.postRunnable(() -> {
+            GlobalMediaCachedDialogs result = new GlobalMediaCachedDialogs();
+            SQLiteCursor cursor = null;
+            try {
+                ensureGlobalMediaSearchTables();
+                // The persisted dialog list is available even before the controller
+                // has finished loading its server-side dialog pages after a restart.
+                cursor = database.queryFinalized("SELECT peers.uid FROM (SELECT s.uid FROM global_media_search_state s INNER JOIN dialogs d ON d.did = s.uid WHERE d.folder_id = "
+                        + folderId + " AND s.version = " + GlobalMediaSearchProgress.VERSION
+                        + " AND s.initialized = 1 UNION SELECT p.uid FROM global_media_preview_peers p LEFT JOIN dialogs live ON live.did = p.uid WHERE p.folder_id = "
+                        + folderId + " AND (live.did IS NULL OR live.folder_id = " + folderId
+                        + ")) peers LEFT JOIN dialogs d ON d.did = peers.uid ORDER BY d.date DESC");
+                ArrayList<Long> usersToLoad = new ArrayList<>();
+                ArrayList<Long> chatsToLoad = new ArrayList<>();
+                while (cursor.next()) {
+                    long dialogId = cursor.longValue(0);
+                    if (dialogId == 0 || DialogObject.isEncryptedDialog(dialogId)) {
+                        continue;
+                    }
+                    result.dialogIds.add(dialogId);
+                    if (dialogId > 0) {
+                        usersToLoad.add(dialogId);
+                    } else {
+                        chatsToLoad.add(-dialogId);
+                    }
+                }
+                cursor.dispose();
+                cursor = null;
+                if (!usersToLoad.isEmpty()) getUsersInternal(usersToLoad, result.users);
+                if (!chatsToLoad.isEmpty()) getChatsInternal(TextUtils.join(",", chatsToLoad), result.chats);
+            } catch (Exception e) {
+                checkSQLException(e);
+                result.dialogIds.clear();
+            } finally {
+                if (cursor != null) cursor.dispose();
+            }
+            AndroidUtilities.runOnUIThread(() -> callback.accept(result));
+        });
+    }
+
     private void ensureGlobalMediaSearchTables() throws Exception {
         if (globalMediaSearchTablesChecked) {
             return;
         }
         database.executeFast("CREATE TABLE IF NOT EXISTS global_media_search_state(uid INTEGER PRIMARY KEY, version INTEGER, initialized INTEGER, history_offset_id INTEGER, head_boundary_id INTEGER, head_floor_date INTEGER, last_head_sync_at INTEGER, history_end_reached INTEGER, catching_up INTEGER, catchup_offset_id INTEGER, catchup_boundary_id INTEGER, pending_head_boundary_id INTEGER)").stepThis().dispose();
+        database.executeFast("CREATE TABLE IF NOT EXISTS global_media_preview_peers(uid INTEGER, folder_id INTEGER, PRIMARY KEY(uid, folder_id))").stepThis().dispose();
         database.executeFast("CREATE INDEX IF NOT EXISTS uid_group_mid_idx_messages_v2 ON messages_v2(uid, group_id, mid)").stepThis().dispose();
         database.executeFast("CREATE INDEX IF NOT EXISTS type_date_uid_mid_idx_media_v4 ON media_v4(type, date DESC, uid DESC, mid DESC)").stepThis().dispose();
         globalMediaSearchTablesChecked = true;
+    }
+
+    public void rememberGlobalMediaPreviewPeers(int folderId, ArrayList<Long> dialogIds) {
+        if (dialogIds == null || dialogIds.isEmpty()) {
+            return;
+        }
+        storageQueue.postRunnable(() -> {
+            SQLitePreparedStatement statement = null;
+            try {
+                ensureGlobalMediaSearchTables();
+                statement = database.executeFast("INSERT OR IGNORE INTO global_media_preview_peers(uid, folder_id) VALUES(?, ?)");
+                for (Long dialogId : dialogIds) {
+                    if (dialogId == null || dialogId == 0 || DialogObject.isEncryptedDialog(dialogId)) {
+                        continue;
+                    }
+                    statement.requery();
+                    statement.bindLong(1, dialogId);
+                    statement.bindInteger(2, folderId);
+                    statement.step();
+                }
+            } catch (Exception e) {
+                checkSQLException(e);
+            } finally {
+                if (statement != null) statement.dispose();
+            }
+        });
     }
 
     public void loadGlobalMediaSearchProgress(ArrayList<Long> dialogIds, Consumer<HashMap<Long, GlobalMediaSearchProgress>> callback) {
@@ -11709,6 +11783,76 @@ public class MessagesStorage extends BaseController {
             }
             GlobalMediaPage pageFinal = page;
             AndroidUtilities.runOnUIThread(() -> callback.onLoaded(pageFinal));
+        });
+    }
+
+    public void loadGlobalMediaStoredMessages(ArrayList<TLRPC.Message> candidates, GlobalMediaPageCallback callback) {
+        storageQueue.postRunnable(() -> {
+            GlobalMediaPage page = new GlobalMediaPage();
+            try {
+                ensureGlobalMediaSearchTables();
+                if (candidates != null && !candidates.isEmpty()) {
+                    StringBuilder keys = new StringBuilder();
+                    for (TLRPC.Message candidate : candidates) {
+                        if (candidate == null || candidate.dialog_id == 0 || candidate.id <= 0) continue;
+                        if (keys.length() > 0) keys.append(" OR ");
+                        keys.append("(m.uid = ").append(candidate.dialog_id).append(" AND m.mid = ")
+                                .append(candidate.id).append(')');
+                    }
+                    if (keys.length() > 0) {
+                        SQLiteCursor cursor = database.queryFinalized("SELECT m.data, m.mid, m.uid, m.date FROM media_v4 m WHERE m.type = "
+                                + MediaDataController.MEDIA_PHOTOVIDEO + " AND (" + keys + ") ORDER BY m.date DESC, m.uid DESC, m.mid DESC");
+                        try {
+                            while (cursor.next()) {
+                                TLRPC.Message message = deserializeGlobalMediaMessage(cursor.byteBufferValue(0),
+                                        cursor.intValue(1), cursor.longValue(2), cursor.intValue(3));
+                                if (message != null) page.messages.add(message);
+                            }
+                        } finally {
+                            cursor.dispose();
+                        }
+                        HashSet<String> groups = new HashSet<>();
+                        page.groupMessages.addAll(page.messages);
+                        for (TLRPC.Message message : page.messages) {
+                            if (message.grouped_id != 0) groups.add(message.dialog_id + ":" + message.grouped_id);
+                        }
+                        HashSet<String> seen = new HashSet<>();
+                        for (TLRPC.Message message : page.messages) seen.add(message.dialog_id + ":" + message.id);
+                        for (String group : groups) {
+                            int split = group.indexOf(':');
+                            long dialogId = Long.parseLong(group.substring(0, split));
+                            long groupId = Long.parseLong(group.substring(split + 1));
+                            SQLiteCursor groupCursor = database.queryFinalized("SELECT m.data, m.mid, m.date FROM messages_v2 g INNER JOIN media_v4 m ON m.uid = g.uid AND m.mid = g.mid AND m.type = "
+                                    + MediaDataController.MEDIA_PHOTOVIDEO + " WHERE g.uid = " + dialogId
+                                    + " AND g.group_id = " + groupId + " ORDER BY m.date DESC, m.mid DESC");
+                            try {
+                                while (groupCursor.next()) {
+                                    TLRPC.Message message = deserializeGlobalMediaMessage(groupCursor.byteBufferValue(0),
+                                            groupCursor.intValue(1), dialogId, groupCursor.intValue(2));
+                                    if (message != null && seen.add(message.dialog_id + ":" + message.id)) {
+                                        page.groupMessages.add(message);
+                                    }
+                                }
+                            } finally {
+                                groupCursor.dispose();
+                            }
+                        }
+                        ArrayList<Long> users = new ArrayList<>();
+                        ArrayList<Long> chats = new ArrayList<>();
+                        for (TLRPC.Message message : page.groupMessages) {
+                            addUsersAndChatsFromMessage(message, users, chats, null);
+                        }
+                        if (!users.isEmpty()) getUsersInternal(users, page.users);
+                        if (!chats.isEmpty()) getChatsInternal(TextUtils.join(",", chats), page.chats);
+                    }
+                }
+            } catch (Exception e) {
+                checkSQLException(e);
+                page.messages.clear();
+                page.groupMessages.clear();
+                page.failed = true;
+            }
+            AndroidUtilities.runOnUIThread(() -> callback.onLoaded(page));
         });
     }
 
