@@ -18,6 +18,7 @@ const run = new Function('globalMediaDialogSearches', 'inFlight', `
     const generation = 1, requestIndex = 1, globalMediaSearchGeneration = 1;
     let globalMediaDialogBatch = null, globalMediaRequestsInFlight = inFlight;
     let globalMediaBatchCursor = 0, globalMediaBatchCompleted = 0, isLoading = false;
+    const messages = { isEmpty: () => true }, emptyView = { showProgress() {} };
     let finished = false, dispatched = false;
     function onGlobalMediaSyncRoundFinished() { finished = true; }
     function dispatchGlobalMediaDialogSearches() { dispatched = true; }
@@ -34,3 +35,79 @@ assert.deepEqual(run([peer(1, 300, { historyEndReached: true }), peer(2, 200)], 
 assert.deepEqual(run([peer(1, 300, { historyEndReached: true })], 0), { peers: [], finished: true, dispatched: false });
 assert.deepEqual(run([peer(1, 300)], 1), { peers: [], finished: false, dispatched: false }, 'Never overlap a request or storage write');
 console.log('PASS: production scheduler control flow, newest-gap priority, head repair, tied frontiers, true-end and in-flight guards');
+
+// Exercise production error handling with unavailable peers between healthy peers.
+// Android widgets and network I/O are stubbed; checkpoints must remain unchanged.
+function methodBody(name) {
+    const methodStart = source.search(new RegExp('private (?:static )?(?:boolean|void) ' + name + '\\('));
+    assert.ok(methodStart >= 0, name);
+    const methodEnd = source.indexOf('\n    private ', methodStart + 1);
+    const method = source.slice(methodStart, methodEnd < 0 ? source.length : methodEnd);
+    return method.slice(method.indexOf('{') + 1, method.lastIndexOf('}'));
+}
+const isUnavailable = new Function('error', methodBody('isGlobalMediaPeerUnavailable')
+    .replace(/"([A-Z_]+)"\.equals\(error\)/g, '(error === "$1")'));
+for (const error of ['CHANNEL_PRIVATE', 'CHANNEL_INVALID', 'CHAT_ADMIN_REQUIRED', 'CHAT_ID_INVALID',
+    'INPUT_USER_DEACTIVATED', 'PEER_ID_INVALID', 'PEER_ID_NOT_SUPPORTED', 'USER_ID_INVALID']) {
+    assert.equal(isUnavailable(error), true, error);
+}
+for (const error of [null, 'TIMEOUT', 'FLOOD_WAIT_60', 'FLOOD_PREMIUM_WAIT_30', 'AUTH_KEY_UNREGISTERED',
+    'INTERNAL', 'INPUT_FILTER_INVALID', 'SEARCH_QUERY_EMPTY', 'LOCAL_MEDIA_WRITE_FAILED']) {
+    assert.equal(isUnavailable(error), false, error);
+}
+function list(items = []) {
+    return { items: [...items], add(x) { this.items.push(x); }, clear() { this.items.length = 0; },
+        remove(x) { const i = this.items.indexOf(x); if (i >= 0) this.items.splice(i, 1); },
+        size() { return this.items.length; }, isEmpty() { return this.items.length === 0; },
+        [Symbol.iterator]() { return this.items[Symbol.iterator](); } };
+}
+const exerciseSkip = new Function('peers', 'list', `
+    const globalMediaDialogSearches = list(peers), globalMediaUnavailableDialogs = list();
+    const globalMediaSnapshotHeadBoundaries = { remove() {} };
+    const globalMediaSnapshotFloors = { remove() {} }, globalMediaSnapshotHistoryEnded = { remove() {} };
+    let globalMediaRequestsInFlight = 1, globalMediaBatchCompleted = 0;
+    let globalMediaDialogBatch = list(peers);
+    const outcomes = [];
+    function updateGlobalMediaTotalCount() {}
+    function onGlobalMediaSyncRoundFinished(generation, success) { outcomes.push(success); }
+    function dispatchGlobalMediaDialogSearches() { outcomes.push('next'); }
+    function finishGlobalMediaNetworkPage(generation, success) { ${methodBody('finishGlobalMediaNetworkPage')} }
+    function skipUnavailableGlobalMediaDialog(generation, dialogSearch) { ${methodBody('skipUnavailableGlobalMediaDialog')} }
+    skipUnavailableGlobalMediaDialog(1, peers[0]);
+    for (let i = 1; i < peers.length; i++) finishGlobalMediaNetworkPage(1, true);
+    return { active: globalMediaDialogSearches.items, skipped: globalMediaUnavailableDialogs.items, outcomes };
+`);
+const blocked = peer(1, 0, { initialized: false });
+const stateBefore = JSON.stringify(blocked.progress);
+const healthy = peer(2, 300);
+const skipped = exerciseSkip([blocked, healthy], list);
+assert.deepEqual(skipped.active, [healthy]);
+assert.deepEqual(skipped.skipped, [blocked]);
+assert.deepEqual(skipped.outcomes, ['next', true], 'One inaccessible peer must not fail the entire round');
+assert.equal(JSON.stringify(blocked.progress), stateBefore, 'Skipping must not certify coverage or history end');
+assert.deepEqual(exerciseSkip([blocked], list).outcomes, [true], 'All inaccessible peers must terminate the round');
+
+const exerciseRetry = new Function('peers', 'list', `
+    let globalMediaLastErrorCode = 'MEDIA_CHATS_UNAVAILABLE', globalMediaUnavailableNoticeShown = true;
+    let globalMediaSnapshotActive = true, globalMediaSearchGeneration = 1;
+    const globalMediaUnavailableDialogs = list(peers), globalMediaDialogSearches = list();
+    const messages = list();
+    let request;
+    function requestGlobalMediaDatabasePage(...args) { request = args; }
+    (() => { ${methodBody('retryGlobalMediaSearch')
+        .replace(/for \(GlobalMediaDialogSearch dialogSearch : globalMediaUnavailableDialogs\)/g, 'for (const dialogSearch of globalMediaUnavailableDialogs)')
+        .replace(/MessagesStorage\.GlobalMediaSearchProgress progress/g, 'const progress')} })();
+    return { active: globalMediaDialogSearches.items, skipped: globalMediaUnavailableDialogs.items,
+        snapshot: globalMediaSnapshotActive, error: globalMediaLastErrorCode, request };
+`);
+const recovered = peer(3, 200, { headBoundaryId: 50, historyOffsetId: 10, historyEndReached: true });
+const retried = exerciseRetry([recovered], list);
+assert.deepEqual(retried.active, [recovered]);
+assert.deepEqual(retried.skipped, []);
+assert.equal(retried.snapshot, false);
+assert.equal(retried.error, null);
+assert.deepEqual(retried.request, [1, false, true], 'An empty retry must not depend on scroll or hasMore');
+assert.equal(recovered.progress.catchingUp, true);
+assert.equal(recovered.progress.catchupBoundaryId, 50);
+assert.equal(recovered.progress.historyOffsetId, 10, 'Retry must preserve the saved history cursor');
+console.log('PASS: inaccessible-peer isolation, strict error classification, unchanged checkpoints and explicit retry');

@@ -84,6 +84,7 @@ import org.telegram.ui.Cells.TextCheckCell;
 import org.telegram.ui.Components.AlertsCreator;
 import org.telegram.ui.Components.AnimatedTextView;
 import org.telegram.ui.Components.BackupImageView;
+import org.telegram.ui.Components.BulletinFactory;
 import org.telegram.ui.Components.ColoredImageSpan;
 import org.telegram.ui.Components.CubicBezierInterpolator;
 import org.telegram.ui.Components.EmbedBottomSheet;
@@ -153,6 +154,9 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     private static final int GLOBAL_MEDIA_EMPTY_PAGE_AUTO_LOAD_LIMIT = 5;
     private ArrayList<GlobalMediaDialogSearch> globalMediaDialogSearches;
     private ArrayList<GlobalMediaDialogSearch> globalMediaDialogBatch;
+    private final ArrayList<GlobalMediaDialogSearch> globalMediaUnavailableDialogs = new ArrayList<>();
+    private String globalMediaLastErrorCode;
+    private boolean globalMediaUnavailableNoticeShown;
     private final HashSet<Long> globalMediaDialogIds = new HashSet<>();
     private final ArrayList<Integer> globalMediaRequestIds = new ArrayList<>();
     private final HashSet<MessageHashId> globalMediaMessageIds = new HashSet<>();
@@ -595,7 +599,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 globalMediaFailurePaused = false;
                 globalMediaEmptyPageAutoLoads = 0;
                 globalMediaCoverageWaiting = false;
-                resumeGlobalMediaWindow();
+                retryGlobalMediaSearch();
             }
         });
         emptyView.subtitle.setOnClickListener(v -> emptyView.performClick());
@@ -1151,6 +1155,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         }
         globalMediaPageRequestInFlight = false;
         if (page == null || page.failed) {
+            globalMediaLastErrorCode = "LOCAL_MEDIA_READ_FAILED";
             globalMediaFailurePaused = true;
             globalMediaCoverageWaiting = false;
             isLoading = false;
@@ -1274,7 +1279,11 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         endReached = !hasMoreGlobalMediaPages();
         updateGlobalMediaTotalCount();
         updateGlobalMediaResults(generation);
-        if (messages.size() < columnsCount * 6 && !endReached
+        if (messages.isEmpty() && endReached && !globalMediaUnavailableDialogs.isEmpty()) {
+            globalMediaFailurePaused = true;
+            globalMediaLastErrorCode = "MEDIA_CHATS_UNAVAILABLE";
+            showGlobalMediaRetry(true);
+        } else if (messages.size() < columnsCount * 6 && !endReached
                 && globalMediaEmptyPageAutoLoads < GLOBAL_MEDIA_EMPTY_PAGE_AUTO_LOAD_LIMIT) {
             globalMediaEmptyPageAutoLoads++;
             AndroidUtilities.runOnUIThread(() -> {
@@ -1290,6 +1299,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         if (globalMediaSnapshotActive && globalMediaHeadRefreshPending) {
             startGlobalMediaHeadRefresh(generation);
         }
+        showGlobalMediaUnavailableNotice();
     }
 
     private boolean isGlobalMediaCoverageComplete(int ignoredTargetDate) {
@@ -1406,11 +1416,64 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         }
         // Strings are resolved by LocaleController; TextView's resource overload
         // cannot read the generated localization IDs used by this project.
-        emptyView.title.setText(getString(failed ? R.string.ErrorOccurred : R.string.SearchEmptyViewTitle2));
+        String title = getString(failed ? R.string.ErrorOccurred : R.string.SearchEmptyViewTitle2);
+        if (failed && !TextUtils.isEmpty(globalMediaLastErrorCode)) {
+            title += "\n" + globalMediaLastErrorCode;
+        }
+        emptyView.title.setText(title);
         emptyView.subtitle.setVisibility(View.VISIBLE);
         emptyView.subtitle.setText(getString(R.string.Retry));
         emptyView.showProgress(false, false);
         emptyView.setVisibility(View.VISIBLE);
+    }
+
+    private void retryGlobalMediaSearch() {
+        globalMediaLastErrorCode = null;
+        if (!globalMediaUnavailableDialogs.isEmpty()) {
+            for (GlobalMediaDialogSearch dialogSearch : globalMediaUnavailableDialogs) {
+                MessagesStorage.GlobalMediaSearchProgress progress = dialogSearch.progress;
+                if (progress.initialized && !progress.catchingUp) {
+                    progress.catchingUp = true;
+                    progress.catchupOffsetId = 0;
+                    progress.catchupBoundaryId = progress.headBoundaryId;
+                    progress.pendingHeadBoundaryId = 0;
+                }
+                globalMediaDialogSearches.add(dialogSearch);
+            }
+            globalMediaUnavailableDialogs.clear();
+            globalMediaUnavailableNoticeShown = false;
+            globalMediaSnapshotActive = false;
+        }
+        // A failed/empty page can have no scroll range or older cursor. Explicit
+        // retry must still be able to request it, even when endReached was true.
+        requestGlobalMediaDatabasePage(globalMediaSearchGeneration, false, messages.isEmpty());
+    }
+
+    private static boolean isGlobalMediaPeerUnavailable(String error) {
+        return "CHANNEL_PRIVATE".equals(error) || "CHANNEL_INVALID".equals(error)
+                || "CHAT_ADMIN_REQUIRED".equals(error) || "CHAT_ID_INVALID".equals(error)
+                || "INPUT_USER_DEACTIVATED".equals(error) || "PEER_ID_INVALID".equals(error)
+                || "PEER_ID_NOT_SUPPORTED".equals(error) || "USER_ID_INVALID".equals(error);
+    }
+
+    private void skipUnavailableGlobalMediaDialog(int generation, GlobalMediaDialogSearch dialogSearch) {
+        // Exclude only for this search. Do not persist a false history end or
+        // advance the checkpoint: retry/reopening can recover access later.
+        globalMediaDialogSearches.remove(dialogSearch);
+        globalMediaUnavailableDialogs.add(dialogSearch);
+        globalMediaSnapshotHeadBoundaries.remove(dialogSearch.dialogId);
+        globalMediaSnapshotFloors.remove(dialogSearch.dialogId);
+        globalMediaSnapshotHistoryEnded.remove(dialogSearch.dialogId);
+        finishGlobalMediaNetworkPage(generation, true);
+    }
+
+    private void showGlobalMediaUnavailableNotice() {
+        if (!globalMediaUnavailableNoticeShown && !globalMediaUnavailableDialogs.isEmpty()
+                && !messages.isEmpty() && isAttachedToWindow()) {
+            globalMediaUnavailableNoticeShown = true;
+            BulletinFactory.of(parentFragment).createSimpleBulletin(R.raw.error,
+                    getString(R.string.GlobalMediaUnavailableChats)).show();
+        }
     }
 
     private void onGlobalMediaSyncRoundFinished(int generation, boolean success) {
@@ -1674,6 +1737,9 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         }
         globalMediaDialogSearches = null;
         globalMediaDialogBatch = null;
+        globalMediaUnavailableDialogs.clear();
+        globalMediaLastErrorCode = null;
+        globalMediaUnavailableNoticeShown = false;
         globalMediaDialogIds.clear();
         globalMediaMessageIds.clear();
         globalMediaGroupContext.clear();
@@ -1861,7 +1927,10 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
 
         GlobalMediaDialogSearch dialogSearch = globalMediaDialogBatch.get(globalMediaBatchCursor++);
         TLRPC.TL_messages_search request = new TLRPC.TL_messages_search();
-        request.peer = dialogSearch.peer;
+        request.peer = MessagesController.getInstance(globalMediaSearchAccount).getInputPeer(dialogSearch.dialogId);
+        if (request.peer == null || request.peer instanceof TLRPC.TL_inputPeerEmpty) {
+            request.peer = dialogSearch.peer;
+        }
         request.q = "";
         request.filter = new TLRPC.TL_inputMessagesFilterPhotoVideo();
         request.limit = GLOBAL_MEDIA_PAGE_SIZE;
@@ -1890,6 +1959,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                     long pendingGroupId = 0;
                     for (TLRPC.Message message : result.messages) {
                         if (message.id <= 0 || message.date <= 0) {
+                            globalMediaLastErrorCode = "MEDIA_INVALID_MESSAGE";
                             finishGlobalMediaNetworkPage(generation, false);
                             return;
                         }
@@ -1906,6 +1976,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                         oldestDate = 0;
                     } else if (request.offset_id > 0 && oldestMessageId >= request.offset_id) {
                         // A repeated page cannot establish any additional coverage.
+                        globalMediaLastErrorCode = "MEDIA_CURSOR_NOT_ADVANCING";
                         finishGlobalMediaNetworkPage(generation, false);
                         return;
                     }
@@ -1972,6 +2043,8 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                                 dialogSearch.historyPendingGroupKey = newPendingGroup;
                             }
                             dialogSearch.pendingGroupKey = after.catchingUp ? newPendingGroup : dialogSearch.historyPendingGroupKey;
+                        } else {
+                            globalMediaLastErrorCode = "LOCAL_MEDIA_WRITE_FAILED";
                         }
                         finishGlobalMediaNetworkPage(generation, stored);
                     });
@@ -1988,6 +2061,13 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                         } catch (NumberFormatException ignored) {
                         }
                     }
+                    if (error != null && isGlobalMediaPeerUnavailable(error.text)) {
+                        skipUnavailableGlobalMediaDialog(generation, dialogSearch);
+                        return;
+                    }
+                    globalMediaLastErrorCode = error == null ? "MEDIA_UNEXPECTED_RESPONSE"
+                            : error.text != null && error.text.matches("[A-Z][A-Z0-9_]{0,79}")
+                            ? error.text : "MEDIA_RPC_ERROR_" + error.code;
                     dialogSearch.failed = true;
                     FileLog.e("Global media sync paused: " + (error == null ? "unexpected response" : error.text));
                     finishGlobalMediaNetworkPage(generation, false);
