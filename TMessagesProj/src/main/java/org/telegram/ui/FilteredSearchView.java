@@ -598,6 +598,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 resumeGlobalMediaWindow();
             }
         });
+        emptyView.subtitle.setOnClickListener(v -> emptyView.performClick());
         addView(emptyView);
         recyclerListView.setEmptyView(emptyView);
         emptyView.setVisibility(View.GONE);
@@ -1129,6 +1130,9 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         globalMediaPageCursorMessageId = cursorMessageId;
         globalMediaPageRequestInFlight = true;
         isLoading = true;
+        if (messages.isEmpty()) {
+            emptyView.showProgress(true, false);
+        }
         final int token = ++globalMediaPageRequestToken;
         int minDate = getGlobalMediaEffectiveMinDate();
         HashMap<Long, Integer> snapshotBounds = globalMediaSnapshotActive
@@ -1151,10 +1155,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             globalMediaCoverageWaiting = false;
             isLoading = false;
             endReached = false;
-            if (messages.isEmpty()) {
-                emptyView.subtitle.setVisibility(View.VISIBLE);
-                emptyView.subtitle.setText(R.string.Retry);
-            }
+            showGlobalMediaRetry(true);
             FileLog.e("Global media database page failed; keeping the current local cursor.");
             return;
         }
@@ -1284,8 +1285,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             }, GLOBAL_MEDIA_REQUEST_INTERVAL_MS);
         } else if (messages.isEmpty() && !endReached && globalMediaEmptyPageAutoLoads >= GLOBAL_MEDIA_EMPTY_PAGE_AUTO_LOAD_LIMIT) {
             globalMediaFailurePaused = true;
-            emptyView.subtitle.setVisibility(View.VISIBLE);
-            emptyView.subtitle.setText(R.string.Retry);
+            showGlobalMediaRetry(false);
         }
         if (globalMediaSnapshotActive && globalMediaHeadRefreshPending) {
             startGlobalMediaHeadRefresh(generation);
@@ -1400,6 +1400,19 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         globalMediaGroupContext.keySet().removeIf(key -> !liveGroupKeys.contains(key));
     }
 
+    private void showGlobalMediaRetry(boolean failed) {
+        if (!messages.isEmpty()) {
+            return;
+        }
+        // Strings are resolved by LocaleController; TextView's resource overload
+        // cannot read the generated localization IDs used by this project.
+        emptyView.title.setText(getString(failed ? R.string.ErrorOccurred : R.string.SearchEmptyViewTitle2));
+        emptyView.subtitle.setVisibility(View.VISIBLE);
+        emptyView.subtitle.setText(getString(R.string.Retry));
+        emptyView.showProgress(false, false);
+        emptyView.setVisibility(View.VISIBLE);
+    }
+
     private void onGlobalMediaSyncRoundFinished(int generation, boolean success) {
         if (generation != requestIndex || generation != globalMediaSearchGeneration) {
             return;
@@ -1416,10 +1429,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             globalMediaFailurePaused = true;
             isLoading = false;
             endReached = false;
-            if (messages.isEmpty()) {
-                emptyView.subtitle.setVisibility(View.VISIBLE);
-                emptyView.subtitle.setText(R.string.Retry);
-            }
+            showGlobalMediaRetry(true);
             return;
         }
         if (!globalMediaSnapshotActive) {
@@ -1823,6 +1833,9 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             return;
         }
         isLoading = true;
+        if (messages.isEmpty()) {
+            emptyView.showProgress(true, false);
+        }
         dispatchGlobalMediaDialogSearches(generation);
     }
 
@@ -2049,6 +2062,11 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             emptyView.showProgress(true, false);
         } else {
             emptyView.showProgress(false);
+            if (messages.isEmpty() && !globalMediaFailurePaused) {
+                emptyView.title.setText(getString(R.string.SearchEmptyViewTitle2));
+                emptyView.subtitle.setVisibility(View.VISIBLE);
+                emptyView.subtitle.setText(getString(R.string.SearchEmptyViewFilteredSubtitle2));
+            }
         }
         if (!viewerAppend) {
             adapter.notifyDataSetChanged();
