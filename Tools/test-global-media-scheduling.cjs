@@ -40,7 +40,7 @@ console.log('PASS: production scheduler control flow, newest-gap priority, head 
 // Exercise production error handling with unavailable peers between healthy peers.
 // Android widgets and network I/O are stubbed; checkpoints must remain unchanged.
 function methodBody(name) {
-    const methodStart = source.search(new RegExp('private (?:static )?(?:boolean|void) ' + name + '\\('));
+    const methodStart = source.search(new RegExp('private (?:static )?(?:boolean|void|int) ' + name + '\\('));
     assert.ok(methodStart >= 0, name);
     const methodEnd = source.indexOf('\n    private ', methodStart + 1);
     const method = source.slice(methodStart, methodEnd < 0 ? source.length : methodEnd);
@@ -113,3 +113,31 @@ assert.equal(recovered.progress.catchingUp, true);
 assert.equal(recovered.progress.catchupBoundaryId, 50);
 assert.equal(recovered.progress.historyOffsetId, 10, 'Retry must preserve the saved history cursor');
 console.log('PASS: inaccessible-peer isolation, strict error classification, unchanged checkpoints and explicit retry');
+
+const alignWindow = new Function('windowStart', 'rawMessages', 'messages', 'columnsCount', `
+    function key(id, dialogId) { return dialogId + ':' + id; }
+    function findGlobalMediaMessageIndex(dialogId, id) {
+        return rawMessages.findIndex(m => m.getId() === id && m.getDialogId() === dialogId);
+    }
+    ${methodBody('alignGlobalMediaWindowStart')
+        .replace(/HashSet<MessageHashId> removed = new HashSet<>\(\)/, 'const removed = new Set()')
+        .replace(/new MessageHashId\(/g, 'key(')
+        .replace(/removed\.contains\(/g, 'removed.has(')
+        .replace(/for \(MessageObject message : messages\)/, 'for (const message of messages)')
+        .replace(/MessageObject (message|rowStart)/g, 'const $1')
+        .replace(/\bint (i|removedVisible|partialRow|rawIndex)\b/g, 'let $1')
+        .replace(/messages\.isEmpty\(\)/g, '(messages.length === 0)')
+        .replace(/(rawMessages|messages)\.get\(([^)]+)\)/g, '$1[$2]')}
+`);
+const gridRaw = Array.from({ length: 120 }, (_, i) => ({ getId: () => i, getDialogId: () => 1 }));
+for (const columns of [3, 6]) {
+    for (const visible of [gridRaw, gridRaw.filter((_, i) => i % 2 === 0)]) {
+        for (const cut of [1, 10, 31, 100]) {
+            const aligned = alignWindow(cut, gridRaw, visible, columns);
+            const removedCount = visible.filter(m => gridRaw.indexOf(m) < aligned).length;
+            assert.ok(aligned <= cut);
+            assert.equal(removedCount % columns, 0, 'Window eviction must preserve retained thumbnail columns');
+        }
+    }
+}
+console.log('PASS: complete visible-row eviction with filtered and unfiltered 3/6-column grids');

@@ -1611,6 +1611,10 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                     windowStart--;
                 }
             }
+            // Preserve the column of every retained thumbnail. Raw-message
+            // boundaries need not be visible row boundaries after filtering.
+            // Album filter context is retained separately by globalMediaGroupContext.
+            windowStart = alignGlobalMediaWindowStart(windowStart);
             windowEnd = windowStart + GLOBAL_MEDIA_WINDOW_SIZE;
             if (windowEnd < rawMessages.size()) {
                 String lastGroup = getMediaGroupKey(rawMessages.get(windowEnd - 1));
@@ -1642,6 +1646,31 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             globalMediaMessageIds.add(new MessageHashId(messageObject.getId(), messageObject.getDialogId()));
         }
         pruneGlobalMediaGroupContext();
+    }
+
+    private int alignGlobalMediaWindowStart(int windowStart) {
+        if (windowStart <= 0 || messages.isEmpty()) {
+            return windowStart;
+        }
+        HashSet<MessageHashId> removed = new HashSet<>();
+        for (int i = 0; i < windowStart; i++) {
+            MessageObject message = rawMessages.get(i);
+            removed.add(new MessageHashId(message.getId(), message.getDialogId()));
+        }
+        int removedVisible = 0;
+        for (MessageObject message : messages) {
+            if (!removed.contains(new MessageHashId(message.getId(), message.getDialogId()))) {
+                break;
+            }
+            removedVisible++;
+        }
+        int partialRow = removedVisible % columnsCount;
+        if (partialRow == 0) {
+            return windowStart;
+        }
+        MessageObject rowStart = messages.get(removedVisible - partialRow);
+        int rawIndex = findGlobalMediaMessageIndex(rowStart.getDialogId(), rowStart.getId());
+        return rawIndex >= 0 ? rawIndex : windowStart;
     }
 
     private int findGlobalMediaMessageIndex(long dialogId, int messageId) {
@@ -1808,6 +1837,10 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     }
 
     private void ensureGlobalMediaAdapter() {
+        // Match SharedMediaLayout: paging must not run default move/change animations.
+        if (recyclerListView.getItemAnimator() != null) {
+            recyclerListView.setItemAnimator(null);
+        }
         if (adapter != sharedPhotoVideoAdapter) {
             adapter = sharedPhotoVideoAdapter;
             recyclerListView.setAdapter(adapter);
