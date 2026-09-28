@@ -12,12 +12,15 @@ body = body.slice(body.indexOf('{') + 1, body.lastIndexOf('}'))
     .replace(/new ArrayList<>\(\)/g, '[]')
     .replace(/for \(GlobalMediaDialogSearch dialogSearch : globalMediaDialogSearches\)/g, 'for (const dialogSearch of globalMediaDialogSearches)')
     .replace(/int newestFloor/g, 'let newestFloor')
+    .replace(/int targetDate/g, 'const targetDate')
     .replace(/globalMediaDialogBatch\.isEmpty\(\)/g, '(globalMediaDialogBatch.length === 0)')
     .replace(/globalMediaDialogBatch\.add\(/g, 'globalMediaDialogBatch.push(');
-const run = new Function('globalMediaDialogSearches', 'inFlight', `
+const run = new Function('globalMediaDialogSearches', 'inFlight', 'targetDate = 0', 'budget = 200', `
     const generation = 1, requestIndex = 1, globalMediaSearchGeneration = 1;
     let globalMediaDialogBatch = null, globalMediaRequestsInFlight = inFlight;
     let globalMediaBatchCursor = 0, globalMediaBatchCompleted = 0, isLoading = false;
+    const globalMediaHistoryPagesRemaining = budget;
+    function getGlobalMediaCoverageTargetDate() { return targetDate; }
     const messages = { isEmpty: () => true }, emptyView = { showProgress() {} };
     let finished = false, dispatched = false;
     function onGlobalMediaSyncRoundFinished() { finished = true; }
@@ -36,6 +39,10 @@ assert.deepEqual(run([peer(1, 300), peer(2, 0, { initialized: false }), peer(3, 
 assert.deepEqual(run([peer(1, 300, { historyEndReached: true }), peer(2, 200)], 0).peers, [2]);
 assert.deepEqual(run([peer(1, 300, { historyEndReached: true })], 0), { peers: [], finished: true, dispatched: false });
 assert.deepEqual(run([peer(1, 300)], 1), { peers: [], finished: false, dispatched: false }, 'Never overlap a request or storage write');
+assert.deepEqual(run([peer(1, 300), peer(2, 200)], 0, 250).peers, [1], 'Only fill peers that have not covered the displayed date range');
+assert.deepEqual(run([peer(1, 300)], 0, 300).peers, [1], 'A tied boundary second still needs coverage');
+assert.equal(run([peer(1, 300)], 0, 400).finished, true, 'Stop once dynamic window target is covered');
+assert.equal(run([peer(1, 300)], 0, 200, 0).finished, true, 'History work must stop at its budget');
 console.log('PASS: production scheduler control flow, newest-gap priority, head repair, tied frontiers, true-end and in-flight guards');
 
 // Exercise production error handling with unavailable peers between healthy peers.
@@ -193,3 +200,50 @@ assert.ok(!/globalMediaOlderCursorDate\s*=(?!=)/.test(liveSource), 'Sparse live 
 assert.ok(source.includes('if (!viewerAppend && (!sameVisibleIds'), 'Duplicate batches must not redraw the media grid');
 assert.ok(source.includes('storage.loadGlobalMediaStoredMessages(result.messages'), 'Per-peer updates must read persisted rows before display');
 console.log('PASS: bounded and deferred DB-backed live merge, unchanged-grid suppression and stable seek cursor');
+
+// Execute the production coverage predicate, including the previously wrong
+// valid-snapshot shortcut: the official preview/cache can have very old holes.
+const coverage = new Function('peers', 'target', `
+    const globalMediaProgressLoaded = true, globalMediaDialogSearches = peers;
+    const globalMediaSnapshotActive = true;
+    function getGlobalMediaCoverageTargetDate() { return target; }
+    ${methodBody('isGlobalMediaCoverageComplete')
+        .replace(/int targetDate/g, 'const targetDate')
+        .replace(/for \(GlobalMediaDialogSearch dialogSearch : globalMediaDialogSearches\)/g, 'for (const dialogSearch of globalMediaDialogSearches)')
+        .replace(/MessagesStorage\.GlobalMediaSearchProgress progress/g, 'const progress')}
+`);
+function coveredPeer(id, floor, extra = {}) {
+    return { ...peer(id, floor, extra), progressLoaded: true };
+}
+assert.equal(coverage([coveredPeer(1, 300), coveredPeer(2, 100)], 200), false,
+    'A valid partial snapshot must not certify a preview date gap as covered');
+assert.equal(coverage([coveredPeer(1, 200)], 200), false, 'Scan through tied timestamps and boundary albums');
+assert.equal(coverage([coveredPeer(1, 199)], 200), true);
+assert.equal(coverage([coveredPeer(1, 0, { historyEndReached: true })], 200), true);
+assert.equal(coverage([coveredPeer(1, 100, { catchingUp: true })], 200), false);
+assert.equal(coverage([coveredPeer(1, 100, { initialized: false })], 200), false);
+assert.equal(coverage([coveredPeer(1, 300)], 400), true,
+    'New rows shrinking the bounded window must stop unnecessary older history work');
+
+const discoverySource = methodBody('continueGlobalMediaSearch');
+const staleLoop = discoverySource.slice(discoverySource.indexOf('long now ='),
+    discoverySource.indexOf('onGlobalMediaProgressReady(generation);'));
+const recheckHeads = new Function('peers', 'checked', 'now', `
+    const globalMediaDialogSearches = peers, globalMediaHeadCheckedDialogs = checked;
+    const GLOBAL_MEDIA_HEAD_STALENESS_MS = 300000;
+    let globalMediaHeadRefreshPending = false;
+    ${staleLoop.replace(/long now = System.currentTimeMillis\(\);/, '')
+        .replace(/for \(GlobalMediaDialogSearch dialogSearch : globalMediaDialogSearches\)/g, 'for (const dialogSearch of globalMediaDialogSearches)')
+        .replace(/MessagesStorage\.GlobalMediaSearchProgress progress/g, 'const progress')
+        .replace(/boolean stale/g, 'const stale')
+        .replace(/globalMediaHeadRefreshPending \|=/g, 'globalMediaHeadRefreshPending ||=')
+        .replace(/globalMediaHeadCheckedDialogs.add\(dialogSearch.dialogId\)/g,
+            '(!checked.has(dialogSearch.dialogId) && (checked.add(dialogSearch.dialogId), true))')}
+    return globalMediaHeadRefreshPending;
+`);
+const longRunning = coveredPeer(1, 100, { lastHeadSyncAt: 1000 });
+assert.equal(recheckHeads([longRunning], new Set([1]), 601001), false,
+    'Dialog rediscovery after five minutes must not restart a head already checked in this search');
+assert.equal(recheckHeads([longRunning], new Set(), 601001), true,
+    'A newly discovered stale peer still needs exactly one head refresh');
+console.log('PASS: real coverage predicate, preview gaps, tied timestamps, dynamic target and one head refresh per search');

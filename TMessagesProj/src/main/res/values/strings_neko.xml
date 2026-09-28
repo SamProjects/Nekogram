@@ -6,6 +6,11 @@
     <string name="MediaFilterTitle">Media filter</string>
     <string name="GlobalMediaUnavailableChats">Some chats cannot be accessed. Showing media from the other chats.</string>
     <string name="GlobalMediaSyncing">Filling in media from all chats…</string>
+    <string name="GlobalMediaSyncHeads">Refreshing chats</string>
+    <string name="GlobalMediaSyncHistory">Filling visible date range</string>
+    <string name="GlobalMediaSyncDiscovering">Discovering chats…</string>
+    <string name="GlobalMediaSyncPages">history pages</string>
+    <string name="GlobalMediaSyncContinue">Scroll or tap to continue</string>
     <string name="MediaFilterHidePhotos">Hide photo-only media</string>
     <string name="MediaFilterHideShortVideos">Hide short videos</string>
     <string name="MediaFilterHideManagedChats">Hide groups/channels I manage</string>
