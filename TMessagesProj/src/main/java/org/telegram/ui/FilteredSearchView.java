@@ -519,6 +519,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
                     globalMediaLoadRequestedForGesture = false;
                     globalMediaHistoryPagesRemaining = 200;
+                    saveGlobalMediaHistoryBudget();
                     AndroidUtilities.hideKeyboard(parentActivity.getCurrentFocus());
                 } else if (newState == RecyclerView.SCROLL_STATE_IDLE) {
                     maybePrefetchGlobalMedia();
@@ -639,6 +640,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             if (globalMediaSearchGeneration != -1 && globalMediaHistoryPagesRemaining <= 0
                     && !isGlobalMediaRoundRunning()) {
                 globalMediaHistoryPagesRemaining = 200;
+                saveGlobalMediaHistoryBudget();
                 globalMediaEmptyPageAutoLoads = 0;
                 globalMediaFailurePaused = false;
                 resumeGlobalMediaWindow();
@@ -1157,7 +1159,8 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         globalMediaFailurePaused = false;
         globalMediaPageNewer = newer;
         globalMediaPageReplace = replace;
-        if (!replace && !isGlobalMediaCoverageComplete(0) && globalMediaHistoryPagesRemaining > 0) {
+        if (!replace && !newer && !globalMediaOlderHasMore
+                && !isGlobalMediaCoverageComplete(0) && globalMediaHistoryPagesRemaining > 0) {
             globalMediaCoverageWaiting = true;
             startGlobalMediaDialogBatch(generation);
             return;
@@ -1852,11 +1855,12 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         }
         // Keep the displayed window intact until the new page is applied at idle.
         // applyGlobalMediaDatabasePage captures the current stable-ID anchor first.
-        if (globalMediaProgressLoaded && !isGlobalMediaCoverageComplete(0)) {
+        if (globalMediaOlderHasMore || rawMessages.isEmpty()) {
+            // A cached next page is not a network coverage gap. Read it first.
+            requestGlobalMediaDatabasePage(globalMediaSearchGeneration, false, false);
+        } else if (globalMediaProgressLoaded && !isGlobalMediaCoverageComplete(0)) {
             globalMediaCoverageWaiting = true;
             startGlobalMediaDialogBatch(globalMediaSearchGeneration);
-        } else if (globalMediaOlderHasMore || rawMessages.isEmpty()) {
-            requestGlobalMediaDatabasePage(globalMediaSearchGeneration, false, false);
         } else {
             globalMediaCoverageWaiting = true;
             startGlobalMediaDialogBatch(globalMediaSearchGeneration);
@@ -1960,6 +1964,33 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             globalMediaLiveMergeRunnable = null;
         }
         updateGlobalMediaSyncLabel();
+    }
+
+    private String globalMediaHistoryBudgetKey() {
+        return "global_media_budget_" + globalMediaSearchAccount + "_" + globalMediaSearchFolder
+                + "_" + UserConfig.getInstance(globalMediaSearchAccount).getClientUserId()
+                + "_" + currentSearchMinDate + "_" + currentSearchMaxDate;
+    }
+
+    private void saveGlobalMediaHistoryBudget() {
+        if (globalMediaSearchGeneration == -1) return;
+        String key = globalMediaHistoryBudgetKey();
+        ApplicationLoader.applicationContext.getSharedPreferences(MEDIA_FILTER_PREFERENCES, Context.MODE_PRIVATE)
+                .edit().putInt(key, globalMediaHistoryPagesRemaining)
+                .putInt(key + "_completed", globalMediaHistoryPagesCompleted)
+                .putLong(key + "_at", System.currentTimeMillis()).apply();
+    }
+
+    private void restoreGlobalMediaHistoryBudget() {
+        SharedPreferences preferences = ApplicationLoader.applicationContext
+                .getSharedPreferences(MEDIA_FILTER_PREFERENCES, Context.MODE_PRIVATE);
+        String key = globalMediaHistoryBudgetKey();
+        long savedAt = preferences.getLong(key + "_at", 0);
+        long age = System.currentTimeMillis() - savedAt;
+        if (savedAt > 0 && age >= 0 && age < GLOBAL_MEDIA_HEAD_STALENESS_MS) {
+            globalMediaHistoryPagesRemaining = Math.max(0, Math.min(200, preferences.getInt(key, 200)));
+            globalMediaHistoryPagesCompleted = Math.max(0, preferences.getInt(key + "_completed", 0));
+        }
     }
 
     private void ensureGlobalMediaAdapter() {
@@ -2454,6 +2485,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                             } else if (!headScan) {
                                 globalMediaHistoryPagesRemaining--;
                                 globalMediaHistoryPagesCompleted++;
+                                saveGlobalMediaHistoryBudget();
                             }
                             dialogSearch.progress = after;
                             dialogSearch.progressLoaded = true;
@@ -2886,6 +2918,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 globalMediaDialogSearches = null;
                 globalMediaSearchAccount = currentAccount;
                 globalMediaSearchFolder = includeFolder ? 1 : 0;
+                restoreGlobalMediaHistoryBudget();
             }
             globalMediaSearchGeneration = requestId;
             lastMessagesSearchString = finalQuery;
