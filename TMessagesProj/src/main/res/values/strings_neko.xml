@@ -11,6 +11,10 @@
     <string name="GlobalMediaSyncDiscovering">Discovering chats…</string>
     <string name="GlobalMediaSyncPages">history pages</string>
     <string name="GlobalMediaSyncContinue">Scroll or tap to continue</string>
+    <string name="GlobalMediaSyncPaused">History fill paused</string>
+    <string name="GlobalMediaSyncComplete">Current date range checked</string>
+    <string name="GlobalMediaSyncHeadsDone">Latest messages checked</string>
+    <string name="GlobalMediaSyncStats">This session (successful pages only)\nReturned: %1$d\nCached requested rows: %2$d\nAdded to live window: %3$d\nVisible live additions after filtering: %4$d\nCounts exclude initial cached pages. Returned/cached rows may overlap between pages; live additions count only newly inserted rows. Long-press the progress to view these counts.</string>
     <string name="MediaFilterHidePhotos">Hide photo-only media</string>
     <string name="MediaFilterHideShortVideos">Hide short videos</string>
     <string name="MediaFilterHideManagedChats">Hide groups/channels I manage</string>

@@ -8,6 +8,10 @@
     <string name="GlobalMediaSyncDiscovering">正在发现会话…</string>
     <string name="GlobalMediaSyncPages">页历史</string>
     <string name="GlobalMediaSyncContinue">滚动或点击继续补齐</string>
+    <string name="GlobalMediaSyncPaused">历史补齐已暂停</string>
+    <string name="GlobalMediaSyncComplete">当前日期范围已检查</string>
+    <string name="GlobalMediaSyncHeadsDone">最新消息已检查</string>
+    <string name="GlobalMediaSyncStats">本次打开（仅成功页面）\n服务器返回：%1$d\n入库并回读的请求媒体：%2$d\n实际加入实时列表：%3$d\n过滤后可见的实时新增：%4$d\n不含初始缓存。返回及回读条目可能跨页重叠；实时新增仅统计实际插入的条目。长按进度可查看统计。</string>
     <string name="MediaFilterHidePhotos">隐藏纯图片</string>
     <string name="MediaFilterHideShortVideos">隐藏短视频</string>
     <string name="MediaFilterHideManagedChats">隐藏我管理的群/频道</string>

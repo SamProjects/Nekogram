@@ -1516,6 +1516,7 @@ public class MessagesStorage extends BaseController {
                         database.executeFast("DELETE FROM bot_keyboard WHERE uid = " + did).stepThis().dispose();
                         database.executeFast("DELETE FROM bot_keyboard_topics WHERE uid = " + did).stepThis().dispose();
                         database.executeFast("DELETE FROM media_counts_v2 WHERE uid = " + did).stepThis().dispose();
+                        invalidateGlobalMediaSearchProgress(did);
                         database.executeFast("DELETE FROM media_v4 WHERE uid = " + did).stepThis().dispose();
                         database.executeFast("DELETE FROM media_holes_v2 WHERE uid = " + did).stepThis().dispose();
                         MediaDataController.getInstance(currentAccount).clearBotKeyboard(did);
@@ -4505,6 +4506,7 @@ public class MessagesStorage extends BaseController {
                         database.executeFast("DELETE FROM bot_keyboard WHERE uid = " + did).stepThis().dispose();
                         database.executeFast("DELETE FROM bot_keyboard_topics WHERE uid = " + did).stepThis().dispose();
                         database.executeFast("DELETE FROM media_counts_v2 WHERE uid = " + did).stepThis().dispose();
+                        invalidateGlobalMediaSearchProgress(did);
                         database.executeFast("DELETE FROM media_v4 WHERE uid = " + did).stepThis().dispose();
                         database.executeFast("DELETE FROM media_holes_v2 WHERE uid = " + did).stepThis().dispose();
                         getMediaDataController().clearBotKeyboard(did);
@@ -4531,6 +4533,7 @@ public class MessagesStorage extends BaseController {
                 database.executeFast("DELETE FROM bot_keyboard WHERE uid = " + did).stepThis().dispose();
                 database.executeFast("DELETE FROM bot_keyboard_topics WHERE uid = " + did).stepThis().dispose();
                 database.executeFast("DELETE FROM media_counts_v2 WHERE uid = " + did).stepThis().dispose();
+                invalidateGlobalMediaSearchProgress(did);
                 database.executeFast("DELETE FROM media_v4 WHERE uid = " + did).stepThis().dispose();
                 database.executeFast("DELETE FROM messages_holes WHERE uid = " + did).stepThis().dispose();
                 database.executeFast("DELETE FROM media_holes_v2 WHERE uid = " + did).stepThis().dispose();
@@ -4645,6 +4648,8 @@ public class MessagesStorage extends BaseController {
                 database.executeFast("DELETE FROM polls_v2 WHERE 1").stepThis().dispose();
                 database.executeFast("DELETE FROM bot_keyboard WHERE uid IN " + ids).stepThis().dispose();
                 database.executeFast("DELETE FROM bot_keyboard_topics WHERE uid IN " + ids).stepThis().dispose();
+                ensureGlobalMediaSearchTables();
+                database.executeFast("DELETE FROM global_media_search_state WHERE uid IN " + ids).stepThis().dispose();
                 database.executeFast("DELETE FROM media_v4 WHERE uid IN " + ids).stepThis().dispose();
                 database.executeFast("DELETE FROM messages_holes WHERE uid IN " + ids).stepThis().dispose();
                 database.executeFast("DELETE FROM media_holes_v2 WHERE uid IN " + ids).stepThis().dispose();
@@ -11402,6 +11407,11 @@ public class MessagesStorage extends BaseController {
         globalMediaSearchTablesChecked = true;
     }
 
+    private void invalidateGlobalMediaSearchProgress(long dialogId) throws Exception {
+        ensureGlobalMediaSearchTables();
+        database.executeFast("DELETE FROM global_media_search_state WHERE uid = " + dialogId).stepThis().dispose();
+    }
+
     public void rememberGlobalMediaPreviewPeers(int folderId, ArrayList<Long> dialogIds) {
         if (dialogIds == null || dialogIds.isEmpty()) {
             return;
@@ -11463,22 +11473,19 @@ public class MessagesStorage extends BaseController {
                             state.catchupBoundaryId = cursor.intValue(10);
                             state.pendingHeadBoundaryId = cursor.intValue(11);
                             long dialogId = cursor.longValue(0);
-                            // Per-dialog cache cleanup and message deletion can invalidate a checkpoint.
-                            // Re-scan conservatively if either recorded boundary is no longer cached.
-                            boolean valid = true;
-                            for (int boundary : new int[]{state.historyOffsetId, state.headBoundaryId}) {
-                                if (boundary <= 0) {
-                                    continue;
-                                }
-                                SQLiteCursor boundaryCursor = database.queryFinalized("SELECT mid, data, date FROM media_v4 WHERE uid = ? AND mid = ? AND type = 0", dialogId, boundary);
+                            // These are network seek positions, not foreign keys into media_v4.
+                            // Deleted, ephemeral and non-media results still advance the cursor.
+                            if (!isValidGlobalMediaSearchProgress(state)) {
+                                continue;
+                            }
+                            if (!state.historyEndReached && state.historyOffsetId > 0) {
+                                // The nearest retained tail is conservative album context when
+                                // the exact network boundary was filtered or deleted.
+                                SQLiteCursor boundaryCursor = database.queryFinalized("SELECT mid, data, date FROM media_v4 WHERE uid = ? AND mid >= ? AND type = 0 ORDER BY mid ASC LIMIT 1", dialogId, state.historyOffsetId);
                                 try {
-                                    if (!boundaryCursor.next()) {
-                                        valid = false;
-                                    } else if (boundary == state.historyOffsetId && !state.historyEndReached) {
-                                        TLRPC.Message boundaryMessage = deserializeGlobalMediaMessage(boundaryCursor.byteBufferValue(1), boundary, dialogId, boundaryCursor.intValue(2));
-                                        if (boundaryMessage == null) {
-                                            valid = false;
-                                        } else {
+                                    if (boundaryCursor.next()) {
+                                        TLRPC.Message boundaryMessage = deserializeGlobalMediaMessage(boundaryCursor.byteBufferValue(1), boundaryCursor.intValue(0), dialogId, boundaryCursor.intValue(2));
+                                        if (boundaryMessage != null) {
                                             state.pendingGroupId = boundaryMessage.grouped_id;
                                         }
                                     }
@@ -11486,9 +11493,7 @@ public class MessagesStorage extends BaseController {
                                     boundaryCursor.dispose();
                                 }
                             }
-                            if (valid) {
-                                result.put(dialogId, state);
-                            }
+                            result.put(dialogId, state);
                         }
                     }
                 }
@@ -11501,6 +11506,17 @@ public class MessagesStorage extends BaseController {
             HashMap<Long, GlobalMediaSearchProgress> resultFinal = result;
             AndroidUtilities.runOnUIThread(() -> callback.accept(resultFinal));
         });
+    }
+
+    private static boolean isValidGlobalMediaSearchProgress(GlobalMediaSearchProgress state) {
+        return state.historyOffsetId >= 0 && state.headBoundaryId >= 0
+                && state.headFloorDate >= 0 && state.lastHeadSyncAt >= 0
+                && state.catchupOffsetId >= 0 && state.catchupBoundaryId >= 0
+                && state.pendingHeadBoundaryId >= 0
+                && (!state.initialized || state.historyEndReached
+                    || (state.historyOffsetId > 0 && state.headFloorDate > 0 && state.headBoundaryId >= state.historyOffsetId))
+                && (!state.catchingUp || (state.catchupOffsetId > 0
+                    && state.pendingHeadBoundaryId >= state.catchupOffsetId));
     }
 
     public void saveGlobalMediaSearchProgress(long dialogId, GlobalMediaSearchProgress progress, Consumer<Boolean> callback) {
@@ -12009,6 +12025,7 @@ public class MessagesStorage extends BaseController {
                 database.executeFast("DELETE FROM bot_keyboard WHERE uid = " + did).stepThis().dispose();
                 database.executeFast("DELETE FROM bot_keyboard_topics WHERE uid = " + did).stepThis().dispose();
                 database.executeFast("UPDATE media_counts_v2 SET old = 1 WHERE uid = " + did).stepThis().dispose();
+                invalidateGlobalMediaSearchProgress(did);
                 database.executeFast("DELETE FROM media_v4 WHERE uid = " + did).stepThis().dispose();
                 database.executeFast("DELETE FROM messages_holes WHERE uid = " + did).stepThis().dispose();
                 database.executeFast("DELETE FROM media_holes_v2 WHERE uid = " + did).stepThis().dispose();

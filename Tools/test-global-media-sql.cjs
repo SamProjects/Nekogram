@@ -159,6 +159,41 @@ assert.deepEqual(db.prepare(bootstrapSelect(1, { VERSION: 1 })).all().map(x => x
 db.exec('INSERT INTO global_media_preview_peers VALUES(-505,0),(-606,1)');
 assert.deepEqual(db.prepare(bootstrapSelect(0, { VERSION: 1 })).all().map(x => x.uid).sort(), [-101,-505]);
 assert.deepEqual(db.prepare(bootstrapSelect(1, { VERSION: 1 })).all().map(x => x.uid).sort(), [-202,-606]);
+// Network seek positions remain valid even when the corresponding media is
+// deleted, ephemeral, filtered out, or the entire retained media set is empty.
+const loader = source.slice(source.indexOf('public void loadGlobalMediaSearchProgress('), source.indexOf('public void saveGlobalMediaSearchProgress('));
+const validation = loader.match(/private static boolean isValidGlobalMediaSearchProgress\([^)]*\)\s*\{\s*return ([\s\S]*?);/)[1];
+const validProgress = new Function('state', `return ${validation};`);
+const progressSelect = loader.match(/SQLiteCursor cursor = progressCursor = database.queryFinalized\(([^;]+)\);/)[1];
+const loadProgressRows = new Function('ids', `return ${progressSelect};`);
+const tailSql = loader.match(/SQLiteCursor boundaryCursor = database.queryFinalized\("([^"]+)"/)[1];
+assert.ok(!loader.includes('valid = false'), 'Missing retained boundary must not invalidate network progress');
+assert.ok(loader.includes('isValidGlobalMediaSearchProgress(state)'), 'Production loader must use the tested validator');
+const checkpoint = { initialized:true, historyOffsetId:49000, headBoundaryId:60000, headFloorDate:recent,
+    lastHeadSyncAt:1, historyEndReached:false, catchingUp:false, catchupOffsetId:0,
+    catchupBoundaryId:0, pendingHeadBoundaryId:0 };
+insertProgress.run(-707, 1, 1, checkpoint.historyOffsetId, checkpoint.headBoundaryId, recent, 1, 0, 0, 0, 0, 0);
+const rawState = db.prepare(loadProgressRows('-707')).get();
+assert.equal(rawState.history_offset_id, 49000);
+assert.equal(validProgress(checkpoint), true, 'All-filtered/empty media retains legitimate progress');
+assert.equal(db.prepare(tailSql).get(-707, checkpoint.historyOffsetId), undefined);
+insertMedia.run(checkpoint.historyOffsetId, -707, recent, 1, new Uint8Array([1]));
+assert.equal(db.prepare(tailSql).get(-707, checkpoint.historyOffsetId), undefined, 'Non-media boundary still has no display tail');
+assert.equal(validProgress(checkpoint), true);
+db.prepare('DELETE FROM media_v4 WHERE uid=-707').run();
+assert.equal(validProgress(checkpoint), true, 'Deleting a boundary does not change network coverage');
+assert.equal(db.prepare(tailSql).get(-101, 49000).mid, 50000, 'Missing boundary restores nearest retained album context');
+assert.equal(validProgress({ ...checkpoint, historyOffsetId:-1 }), false);
+assert.equal(validProgress({ ...checkpoint, headFloorDate:0 }), false);
+assert.equal(validProgress({ ...checkpoint, headBoundaryId:100 }), false);
+assert.equal(validProgress({ ...checkpoint, catchingUp:true }), false);
+assert.equal(validProgress({ ...checkpoint, catchingUp:true, catchupOffsetId:55000, pendingHeadBoundaryId:61000 }), true);
+assert.equal(validProgress({ ...checkpoint, historyEndReached:true, historyOffsetId:0, headBoundaryId:0, headFloorDate:0 }), true);
+assert.ok(loader.includes('cursor.intValue(1) != GlobalMediaSearchProgress.VERSION'), 'Incompatible versions are not reused');
+const invalidation = source.match(/database.executeFast\("(DELETE FROM global_media_search_state WHERE uid = )" \+ dialogId\)/)[1];
+db.exec(invalidation + '-707');
+assert.equal(db.prepare(loadProgressRows('-707')).get(), undefined, 'Explicit cache clearing invalidates checkpoint');
 db.close();
+console.log('PASS: production checkpoint query and validator, absent/non-media/deleted tails, empty cache, catch-up legality and explicit invalidation');
 console.log('PASS: persistent media peer discovery without network, folder isolation and checkpoint version filtering');
 console.log('PASS: production SQL, global ordering, equal-second ties, coverage cutoff, date range, bidirectional readback, insert/delete-stable cursors, cache rollback and local-state preservation');

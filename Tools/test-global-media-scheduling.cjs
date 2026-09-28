@@ -247,3 +247,24 @@ assert.equal(recheckHeads([longRunning], new Set([1]), 601001), false,
 assert.equal(recheckHeads([longRunning], new Set(), 601001), true,
     'A newly discovered stale peer still needs exactly one head refresh');
 console.log('PASS: real coverage predicate, preview gaps, tied timestamps, dynamic target and one head refresh per search');
+// Execute the production actual-insertion branch twice with the same key.
+const counterLiveSource = methodBody('queueGlobalMediaLiveMessages');
+const insertion = counterLiveSource.match(/if \(globalMediaMessageIds.add\(id\)\) \{([\s\S]*?)\n\s*\}/)[1];
+const countLive = new Function(`
+    const globalMediaMessageIds = new Set(), addedIds = new Set(), rawMessages = [];
+    let globalMediaLiveAddedCount = 0, changed = false;
+    const item = { setQuery() {} }, id = 'same-row';
+    for (let attempt = 0; attempt < 2; attempt++) {
+        if (!globalMediaMessageIds.has(id)) {
+            globalMediaMessageIds.add(id);
+            ${insertion.replace(/rawMessages.add\(item\)/g, 'rawMessages.push(item)')}
+        }
+    }
+    return [globalMediaLiveAddedCount, rawMessages.length, addedIds.size];
+`);
+assert.deepEqual(countLive(), [1,1,1], 'Repeated retained rows must not inflate actual live additions');
+assert.ok(counterLiveSource.includes('addedIds.remove(new MessageHashId(visible.getId(), visible.getDialogId()))'),
+    'Visible additions consume each actual added key only once');
+assert.ok(source.includes('globalMediaStoredCount += page.messages.size()'),
+    'Storage count must exclude extra album context rows');
+console.log('PASS: actual live insertion counters do not duplicate retained rows; stored statistics exclude album context');
