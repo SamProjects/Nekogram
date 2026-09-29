@@ -147,6 +147,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     private int requestIndex;
     private static final int GLOBAL_MEDIA_PAGE_SIZE = 10;
     private static final int GLOBAL_MEDIA_REFRESH_BATCH_SIZE = 100;
+    private static final long GLOBAL_MEDIA_LIVE_MERGE_INTERVAL_MS = 1500;
     private static final int GLOBAL_MEDIA_WINDOW_SIZE = 1000;
     private static final int GLOBAL_MEDIA_WINDOW_ADVANCE = 400;
     private static final long GLOBAL_MEDIA_REQUEST_INTERVAL_MS = 200;
@@ -1450,7 +1451,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 visibleGroupKeys.add(key);
             }
         }
-        HashMap<String, ArrayList<MessageObject>> incoming = new HashMap<>();
+        boolean changed = false;
         for (TLRPC.Message message : groupMessages) {
             if (message == null || message.dialog_id == 0 || message.grouped_id == 0) {
                 continue;
@@ -1459,22 +1460,17 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             if (!visibleGroupKeys.contains(key)) {
                 continue;
             }
-            ArrayList<MessageObject> group = incoming.computeIfAbsent(key, unused -> new ArrayList<>());
-            group.add(new MessageObject(globalMediaSearchAccount, message, false, true));
-        }
-        boolean changed = false;
-        for (String key : incoming.keySet()) {
             ArrayList<MessageObject> all = globalMediaGroupContext.computeIfAbsent(key, unused -> new ArrayList<>());
-            HashSet<MessageHashId> seen = new HashSet<>();
+            boolean known = false;
             for (MessageObject item : all) {
-                seen.add(new MessageHashId(item.getId(), item.getDialogId()));
-            }
-            for (MessageObject item : incoming.get(key)) {
-                MessageHashId hash = new MessageHashId(item.getId(), item.getDialogId());
-                if (seen.add(hash)) {
-                    all.add(item);
-                    changed = true;
+                if (item.getId() == message.id) {
+                    known = true;
+                    break;
                 }
+            }
+            if (!known) {
+                all.add(new MessageObject(globalMediaSearchAccount, message, false, true));
+                changed = true;
             }
         }
         return changed;
@@ -1807,7 +1803,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         globalMediaResultsUpdateRunnable = () -> {
             if (globalMediaScrollState != RecyclerView.SCROLL_STATE_IDLE
                     || PhotoViewer.getInstance().isVisible() && !globalMediaViewerLoad) {
-                AndroidUtilities.runOnUIThread(globalMediaResultsUpdateRunnable, 150);
+                AndroidUtilities.runOnUIThread(globalMediaResultsUpdateRunnable, GLOBAL_MEDIA_LIVE_MERGE_INTERVAL_MS);
                 return;
             }
             globalMediaResultsUpdateRunnable = null;
@@ -2233,15 +2229,23 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     }
 
     private void queueGlobalMediaStoredPage(int generation, MessagesStorage.GlobalMediaPage page) {
+        queueGlobalMediaStoredPage(generation, page, false);
+    }
+
+    private void queueGlobalMediaStoredPage(int generation, MessagesStorage.GlobalMediaPage page, boolean recoveredWindow) {
         if (generation != requestIndex || generation != globalMediaSearchGeneration
                 || page == null || page.failed) return;
         MessagesController controller = MessagesController.getInstance(globalMediaSearchAccount);
         controller.putUsers(page.users, true);
         controller.putChats(page.chats, true);
-        queueGlobalMediaLiveMessages(generation, page.groupMessages);
+        queueGlobalMediaLiveMessages(generation, page.groupMessages, recoveredWindow);
     }
 
     private void queueGlobalMediaLiveMessages(int generation, ArrayList<TLRPC.Message> incoming) {
+        queueGlobalMediaLiveMessages(generation, incoming, false);
+    }
+
+    private void queueGlobalMediaLiveMessages(int generation, ArrayList<TLRPC.Message> incoming, boolean recoveredWindow) {
         if (generation != requestIndex || generation != globalMediaSearchGeneration
                 || incoming == null || incoming.isEmpty()) {
             return;
@@ -2254,7 +2258,9 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             }
         }
         if (globalMediaPendingLiveMessages.size() > GLOBAL_MEDIA_WINDOW_SIZE) {
-            globalMediaLiveOverflow = true;
+            // Album expansion can exceed the window even on a recovery read.
+            // Never let that read recursively schedule the same recovery forever.
+            if (!recoveredWindow) globalMediaLiveOverflow = true;
             globalMediaPendingLiveMessages.sort((left, right) -> {
                 int date = Integer.compare(right.date, left.date);
                 if (date != 0) return date;
@@ -2267,7 +2273,12 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 globalMediaPendingLiveIds.add(new MessageHashId(message.id, message.dialog_id));
             }
         }
-        if (globalMediaLiveMergeRunnable != null) return;
+        scheduleGlobalMediaLiveMerge(generation);
+    }
+
+    private void scheduleGlobalMediaLiveMerge(int generation) {
+        if (globalMediaLiveMergeRunnable != null || globalMediaPendingLiveMessages.isEmpty()
+                || !isAttachedToWindow()) return;
         globalMediaLiveMergeRunnable = () -> {
             if (generation != requestIndex || generation != globalMediaSearchGeneration) {
                 globalMediaPendingLiveMessages.clear();
@@ -2275,9 +2286,13 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 globalMediaLiveMergeRunnable = null;
                 return;
             }
+            if (!isAttachedToWindow()) {
+                globalMediaLiveMergeRunnable = null;
+                return;
+            }
             if (globalMediaScrollState != RecyclerView.SCROLL_STATE_IDLE || PhotoViewer.getInstance().isVisible()
                     || globalMediaPendingPage != null || globalMediaPageRequestInFlight) {
-                AndroidUtilities.runOnUIThread(globalMediaLiveMergeRunnable, 150);
+                AndroidUtilities.runOnUIThread(globalMediaLiveMergeRunnable, GLOBAL_MEDIA_LIVE_MERGE_INTERVAL_MS);
                 return;
             }
             globalMediaLiveMergeRunnable = null;
@@ -2296,7 +2311,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 MessagesStorage.getInstance(globalMediaSearchAccount).loadGlobalMediaPage(
                         getGlobalMediaDialogIds(), MediaDataController.MEDIA_PHOTOVIDEO,
                         minDate, maxDate, GLOBAL_MEDIA_WINDOW_SIZE, 0, 0, 0, false, null,
-                        page -> queueGlobalMediaStoredPage(generation, page));
+                        page -> queueGlobalMediaStoredPage(generation, page, true));
             }
             int previousItemCount = adapter == null ? 0 : adapter.getItemCount();
             MessageObject initialOldest = rawMessages.isEmpty() ? null : rawMessages.get(rawMessages.size() - 1);
@@ -2305,19 +2320,21 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             boolean changed = false;
             for (TLRPC.Message message : pending) {
                 if (message == null || message.dialog_id == 0 || message.id <= 0) continue;
-                MessageObject item = new MessageObject(globalMediaSearchAccount, message, false, true);
-                if (!isInCurrentGlobalMediaDateRange(item)) continue;
-                MessageHashId id = new MessageHashId(item.getId(), item.getDialogId());
+                MessageHashId id = new MessageHashId(message.id, message.dialog_id);
                 if (globalMediaMessageIds.contains(id)) continue;
+                long date = message.date * 1000L;
+                if (currentSearchMinDate > 0 && date < currentSearchMinDate
+                        || currentSearchMaxDate > 0 && date > currentSearchMaxDate) continue;
                 if (initialWindowFull && initialOldest != null
-                        && compareGlobalMediaMessages(item, initialOldest) > 0) {
+                        && compareGlobalMediaLiveMessage(message, initialOldest) > 0) {
                     continue; // Persisted: the older seek page will find it when needed.
                 }
                 if (globalMediaNewerHasMore && initialNewest != null
-                        && compareGlobalMediaMessages(item, initialNewest) < 0) {
+                        && compareGlobalMediaLiveMessage(message, initialNewest) < 0) {
                     continue; // Persisted: the newer seek page will find it when needed.
                 }
                 if (globalMediaMessageIds.add(id)) {
+                    MessageObject item = new MessageObject(globalMediaSearchAccount, message, false, true);
                     item.setQuery("");
                     rawMessages.add(item);
                     addedIds.add(id);
@@ -2342,7 +2359,16 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             }
             updateGlobalMediaSyncLabel();
         };
-        AndroidUtilities.runOnUIThread(globalMediaLiveMergeRunnable, 250);
+        // Bootstrap promptly; amortize subsequent whole-window filtering/layout work.
+        AndroidUtilities.runOnUIThread(globalMediaLiveMergeRunnable,
+                rawMessages.isEmpty() ? 250 : GLOBAL_MEDIA_LIVE_MERGE_INTERVAL_MS);
+    }
+
+    private int compareGlobalMediaLiveMessage(TLRPC.Message message, MessageObject other) {
+        int date = Integer.compare(other.messageOwner.date, message.date);
+        if (date != 0) return date;
+        int dialog = Long.compare(other.getDialogId(), message.dialog_id);
+        return dialog != 0 ? dialog : Integer.compare(other.getId(), message.id);
     }
 
     private void dispatchGlobalMediaDialogSearches(int generation) {
@@ -3891,6 +3917,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         notificationCenter.addObserver(this, NotificationCenter.emojiLoaded);
         notificationCenter.addObserver(this, NotificationCenter.dialogsNeedReload);
         scheduleGlobalMediaPageApply();
+        scheduleGlobalMediaLiveMerge(globalMediaSearchGeneration);
         if (globalMediaWaitingForDialogs && globalMediaSearchGeneration == requestIndex) {
             continueGlobalMediaSearch(globalMediaSearchGeneration);
         } else if (globalMediaDialogBatch != null && globalMediaRequestsInFlight == 0
@@ -3911,6 +3938,10 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         NotificationCenter notificationCenter = NotificationCenter.getInstance(lastAccount);
         notificationCenter.removeObserver(this, NotificationCenter.emojiLoaded);
         notificationCenter.removeObserver(this, NotificationCenter.dialogsNeedReload);
+        if (globalMediaLiveMergeRunnable != null) {
+            AndroidUtilities.cancelRunOnUIThread(globalMediaLiveMergeRunnable);
+            globalMediaLiveMergeRunnable = null;
+        }
         if (globalMediaApplyPageRunnable != null) {
             AndroidUtilities.cancelRunOnUIThread(globalMediaApplyPageRunnable);
             globalMediaApplyPageRunnable = null;

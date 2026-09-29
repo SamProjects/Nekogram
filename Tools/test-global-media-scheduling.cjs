@@ -191,7 +191,7 @@ assert.deepEqual(cacheReady(true, true, true), ['refresh'], 'Background discover
 console.log('PASS: cache-first startup and partial valid snapshots without visible-list replacement');
 
 const liveStart = source.indexOf('private void queueGlobalMediaLiveMessages(');
-const liveEnd = source.indexOf('\n    private ', liveStart + 1);
+const liveEnd = source.indexOf('\n    private int compareGlobalMediaLiveMessage', liveStart + 1);
 const liveSource = source.slice(liveStart, liveEnd);
 assert.ok(liveSource.includes('globalMediaPendingLiveMessages.size() > GLOBAL_MEDIA_WINDOW_SIZE'), 'Pending network rows must be bounded');
 assert.ok(liveSource.includes('globalMediaScrollState != RecyclerView.SCROLL_STATE_IDLE')
@@ -248,7 +248,7 @@ assert.equal(recheckHeads([longRunning], new Set(), 601001), true,
     'A newly discovered stale peer still needs exactly one head refresh');
 console.log('PASS: real coverage predicate, preview gaps, tied timestamps, dynamic target and one head refresh per search');
 // Execute the production actual-insertion branch twice with the same key.
-const counterLiveSource = methodBody('queueGlobalMediaLiveMessages');
+const counterLiveSource = methodBody('scheduleGlobalMediaLiveMerge');
 const insertion = counterLiveSource.match(/if \(globalMediaMessageIds.add\(id\)\) \{([\s\S]*?)\n\s*\}/)[1];
 const countLive = new Function(`
     const globalMediaMessageIds = new Set(), addedIds = new Set(), rawMessages = [];
@@ -257,7 +257,8 @@ const countLive = new Function(`
     for (let attempt = 0; attempt < 2; attempt++) {
         if (!globalMediaMessageIds.has(id)) {
             globalMediaMessageIds.add(id);
-            ${insertion.replace(/rawMessages.add\(item\)/g, 'rawMessages.push(item)')}
+            ${insertion.replace(/MessageObject item = new MessageObject\([^;]+;/g, '')
+                .replace(/rawMessages.add\(item\)/g, 'rawMessages.push(item)')}
         }
     }
     return [globalMediaLiveAddedCount, rawMessages.length, addedIds.size];
