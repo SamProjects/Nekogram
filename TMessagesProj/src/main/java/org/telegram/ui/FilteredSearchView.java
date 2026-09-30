@@ -519,6 +519,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 globalMediaScrollState = newState;
                 if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
                     globalMediaLoadRequestedForGesture = false;
+                    globalMediaEmptyPageAutoLoads = 0;
                     globalMediaHistoryPagesRemaining = 200;
                     saveGlobalMediaHistoryBudget();
                     AndroidUtilities.hideKeyboard(parentActivity.getCurrentFocus());
@@ -537,15 +538,14 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 int visibleItemCount = Math.abs(lastVisibleItem - firstVisibleItem) + 1;
                 int totalItemCount = recyclerView.getAdapter().getItemCount();
                 if (globalMediaSearchGeneration != -1 && visibleItemCount > 0
-                        && lastVisibleItem >= totalItemCount - 20 && hasMoreGlobalMediaPages() && dy > 0) {
+                        && lastVisibleItem >= totalItemCount - 40 && hasMoreGlobalMediaPages() && dy > 0) {
                     if (globalMediaScrollState != RecyclerView.SCROLL_STATE_IDLE) {
                         globalMediaFailurePaused = false;
-                        globalMediaEmptyPageAutoLoads = 0;
                     }
                     maybePrefetchGlobalMedia();
                 } else if (globalMediaSearchGeneration != -1 && globalMediaNewerHasMore && visibleItemCount > 0
-                        && firstVisibleItem <= 10 && dy < 0
-                        && (!isGlobalMediaRoundRunning() || globalMediaSnapshotActive)
+                        && firstVisibleItem <= 20 && dy < 0
+                        && !globalMediaPageRequestInFlight && globalMediaPendingPage == null
                         && globalMediaScrollState != RecyclerView.SCROLL_STATE_IDLE
                         && !globalMediaLoadRequestedForGesture) {
                     globalMediaLoadRequestedForGesture = true;
@@ -1258,21 +1258,50 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
                 globalMediaApplyPageRunnable = null;
                 return;
             }
-            if (globalMediaScrollState != RecyclerView.SCROLL_STATE_IDLE
+            if (recyclerListView.isComputingLayout()
+                    || globalMediaScrollState != RecyclerView.SCROLL_STATE_IDLE && !canAppendGlobalMediaPageWhileScrolling()
                     || PhotoViewer.getInstance().isVisible() && !globalMediaViewerLoad) {
                 AndroidUtilities.runOnUIThread(globalMediaApplyPageRunnable, 120);
                 return;
             }
             MessagesStorage.GlobalMediaPage page = globalMediaPendingPage;
             int generation = globalMediaPendingPageGeneration;
+            boolean appendWhileScrolling = globalMediaScrollState != RecyclerView.SCROLL_STATE_IDLE
+                    && canAppendGlobalMediaPageWhileScrolling();
             globalMediaPendingPage = null;
             globalMediaApplyPageRunnable = null;
-            applyGlobalMediaDatabasePage(generation, page);
+            applyGlobalMediaDatabasePage(generation, page, appendWhileScrolling);
         };
         AndroidUtilities.runOnUIThread(globalMediaApplyPageRunnable, 0);
     }
 
-    private void applyGlobalMediaDatabasePage(int generation, MessagesStorage.GlobalMediaPage page) {
+    private boolean canAppendGlobalMediaPageWhileScrolling() {
+        // Prepend, eviction and album-context changes may move visible rows.
+        // Keep those cached until idle; only an unambiguous tail append is safe.
+        if (globalMediaPageNewer || globalMediaPageReplace || globalMediaPendingPage == null
+                || rawMessages.size() + globalMediaPendingPage.messages.size() > GLOBAL_MEDIA_WINDOW_SIZE) {
+            return false;
+        }
+        // Storage includes every page message in groupMessages, even when no
+        // album exists. Only actual grouped rows can alter earlier context.
+        for (TLRPC.Message message : globalMediaPendingPage.groupMessages) {
+            if (message != null && message.grouped_id != 0) {
+                return false;
+            }
+        }
+        MessageObject oldest = rawMessages.isEmpty() ? null : rawMessages.get(rawMessages.size() - 1);
+        for (TLRPC.Message message : globalMediaPendingPage.messages) {
+            if (message == null || message.grouped_id != 0
+                    || oldest != null && compareGlobalMediaLiveMessage(message, oldest) < 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void applyGlobalMediaDatabasePage(int generation, MessagesStorage.GlobalMediaPage page,
+                                               boolean appendWhileScrolling) {
+        int previousVisibleCount = messages.size();
         int previousItemCount = adapter == null ? 0 : adapter.getItemCount();
         globalMediaCoverageWaiting = false;
         if (!PhotoViewer.getInstance().isVisible() && globalMediaWindowAnchorMessageId == 0) {
@@ -1340,10 +1369,10 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             trimGlobalMediaWindow(false);
         }
         pruneGlobalMediaGroupContext();
-        isLoading = false;
+        isLoading = globalMediaRequestsInFlight != 0 || globalMediaDialogBatch != null;
         endReached = !hasMoreGlobalMediaPages();
         updateGlobalMediaTotalCount();
-        updateGlobalMediaResults(generation, previousItemCount);
+        updateGlobalMediaResults(generation, previousItemCount, appendWhileScrolling);
         if (messages.isEmpty() && !globalMediaPreviewRequested) {
             requestGlobalMediaPreview(generation);
         }
@@ -1351,12 +1380,15 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             globalMediaFailurePaused = true;
             globalMediaLastErrorCode = "MEDIA_CHATS_UNAVAILABLE";
             showGlobalMediaRetry(true);
-        } else if (messages.size() < columnsCount * 6 && !endReached
+        } else if ((messages.size() < columnsCount * 12
+                || messages.size() - previousVisibleCount < columnsCount * 6)
+                && !globalMediaPageNewer && globalMediaOlderHasMore && !endReached
+                && rawMessages.size() < GLOBAL_MEDIA_WINDOW_SIZE
                 && globalMediaEmptyPageAutoLoads < GLOBAL_MEDIA_EMPTY_PAGE_AUTO_LOAD_LIMIT) {
             globalMediaEmptyPageAutoLoads++;
             AndroidUtilities.runOnUIThread(() -> {
                 if (generation == requestIndex && generation == globalMediaSearchGeneration
-                        && (!isGlobalMediaRoundRunning() || globalMediaSnapshotActive)) {
+                        && !globalMediaPageRequestInFlight && globalMediaPendingPage == null) {
                     resumeGlobalMediaWindow();
                 }
             }, GLOBAL_MEDIA_REQUEST_INTERVAL_MS);
@@ -1591,8 +1623,6 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             if (globalMediaHistoryPagesRemaining > 0
                     && (historyRequestedDuringRefresh || !isGlobalMediaCoverageComplete(0))) {
                 globalMediaCoverageWaiting = true;
-                globalMediaPageNewer = false;
-                globalMediaPageReplace = false;
                 startGlobalMediaDialogBatch(generation);
             }
             if (globalMediaDiscoveryPending) {
@@ -1613,12 +1643,17 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
             globalMediaHeadRefreshPending = false;
         }
         if (!isGlobalMediaCoverageComplete(0) && globalMediaHistoryPagesRemaining > 0) {
+            // Newly persisted cache rows are readable before all peers catch up.
+            globalMediaOlderHasMore = true;
+            requestGlobalMediaDatabasePage(generation, false, rawMessages.isEmpty());
             globalMediaCoverageWaiting = true;
             startGlobalMediaDialogBatch(generation);
             return;
         }
         globalMediaFailurePaused = false;
-        requestGlobalMediaDatabasePage(generation, globalMediaPageNewer, globalMediaPageReplace && rawMessages.isEmpty());
+        // Network completion must not overwrite an in-flight local page's direction.
+        globalMediaOlderHasMore = true;
+        requestGlobalMediaDatabasePage(generation, false, rawMessages.isEmpty());
     }
 
     private void startGlobalMediaHeadRefresh(int generation) {
@@ -1814,14 +1849,15 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
 
     private void maybePrefetchGlobalMedia() {
         if (globalMediaSearchGeneration == -1 || !isAttachedToWindow() || globalMediaFailurePaused
-                || isGlobalMediaRoundRunning() || globalMediaWindowResumeScheduled
+                || globalMediaPageRequestInFlight || globalMediaPendingPage != null
+                || globalMediaProgressLoading || globalMediaWindowResumeScheduled
                 || PhotoViewer.getInstance().isVisible() || messages.isEmpty()
                 || globalMediaEmptyPageAutoLoads >= GLOBAL_MEDIA_EMPTY_PAGE_AUTO_LOAD_LIMIT
                 || !hasMoreGlobalMediaPages()) {
             return;
         }
         int lastVisible = layoutManager.findLastVisibleItemPosition();
-        if (lastVisible < 0 || lastVisible < adapter.getItemCount() - 20) {
+        if (lastVisible < 0 || lastVisible < adapter.getItemCount() - 40) {
             return;
         }
         int generation = globalMediaSearchGeneration;
@@ -1829,7 +1865,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         AndroidUtilities.runOnUIThread(() -> {
             globalMediaWindowResumeScheduled = false;
             if (generation == requestIndex && generation == globalMediaSearchGeneration
-                    && !globalMediaFailurePaused && !isGlobalMediaRoundRunning()) {
+                    && !globalMediaFailurePaused && !globalMediaPageRequestInFlight && globalMediaPendingPage == null) {
                 globalMediaEmptyPageAutoLoads++;
                 resumeGlobalMediaWindow();
             }
@@ -1838,9 +1874,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
 
     private void resumeGlobalMediaWindow() {
         if (globalMediaSearchGeneration == -1 || !hasMoreGlobalMediaPages()
-                || globalMediaPageRequestInFlight || globalMediaPendingPage != null || globalMediaProgressLoading
-                || globalMediaCoverageWaiting && !globalMediaHeadRefreshRunning
-                || globalMediaDialogBatch != null && !globalMediaHeadRefreshRunning) {
+                || globalMediaPageRequestInFlight || globalMediaPendingPage != null || globalMediaProgressLoading) {
             return;
         }
         if (globalMediaFailurePaused) {
@@ -1849,8 +1883,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
         if (PhotoViewer.getInstance().isVisible() && rawMessages.size() >= GLOBAL_MEDIA_WINDOW_SIZE) {
             return;
         }
-        // Keep the displayed window intact until the new page is applied at idle.
-        // applyGlobalMediaDatabasePage captures the current stable-ID anchor first.
+        // Read local neighbours independently of background peer synchronization.
         if (globalMediaOlderHasMore || rawMessages.isEmpty()) {
             // A cached next page is not a network coverage gap. Read it first.
             requestGlobalMediaDatabasePage(globalMediaSearchGeneration, false, false);
@@ -1865,8 +1898,7 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
 
     private void requestGlobalMediaNewerPage(int generation, boolean replace) {
         if (generation != requestIndex || generation != globalMediaSearchGeneration || !globalMediaNewerHasMore
-                || globalMediaPageRequestInFlight || globalMediaProgressLoading
-                || globalMediaCoverageWaiting && !globalMediaSnapshotActive) {
+                || globalMediaPageRequestInFlight || globalMediaPendingPage != null || globalMediaProgressLoading) {
             return;
         }
         requestGlobalMediaDatabasePage(generation, true, replace);
@@ -2631,10 +2663,14 @@ public class FilteredSearchView extends FrameLayout implements NotificationCente
     }
 
     private void updateGlobalMediaResults(int generation, int previousItemCount) {
+        updateGlobalMediaResults(generation, previousItemCount, false);
+    }
+
+    private void updateGlobalMediaResults(int generation, int previousItemCount, boolean appendWhileScrolling) {
         if (generation != requestIndex || generation != globalMediaSearchGeneration) {
             return;
         }
-        if (globalMediaScrollState != RecyclerView.SCROLL_STATE_IDLE
+        if (globalMediaScrollState != RecyclerView.SCROLL_STATE_IDLE && !appendWhileScrolling
                 || PhotoViewer.getInstance().isVisible() && !globalMediaViewerLoad) {
             globalMediaResultsDirty = true;
             scheduleGlobalMediaResultsUpdate(generation);

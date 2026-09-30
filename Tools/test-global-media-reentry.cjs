@@ -60,10 +60,13 @@ assert.match(body('requestGlobalMediaDatabasePage'), /!replace && !newer && !glo
 assert.match(body('onGlobalMediaSyncRoundFinished'), /if \(!isGlobalMediaCoverageComplete\(0\) && globalMediaHistoryPagesRemaining > 0\)/, 'Background coverage repair must continue even when cached pages remain');
 const coverageDecision = body('onGlobalMediaSyncRoundFinished').match(/if \(!isGlobalMediaCoverageComplete\(0\) && globalMediaHistoryPagesRemaining > 0\) \{[\s\S]*?\n        \}/)[0];
 const repair = new Function('coverage', 'budget', 'cachedHasMore', `
-    const generation = 1, globalMediaHistoryPagesRemaining = budget, globalMediaOlderHasMore = cachedHasMore;
+    const generation = 1, globalMediaHistoryPagesRemaining = budget;
+    let globalMediaOlderHasMore = cachedHasMore;
+    const rawMessages = { isEmpty: () => false };
     let globalMediaCoverageWaiting = false, repaired = false;
     function isGlobalMediaCoverageComplete() { return coverage; }
     function startGlobalMediaDialogBatch() { repaired = true; }
+    function requestGlobalMediaDatabasePage() {}
     (() => { ${coverageDecision} })();
     return repaired;
 `);
