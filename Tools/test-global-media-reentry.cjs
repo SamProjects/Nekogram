@@ -56,7 +56,7 @@ assert.equal(resume(false, false, true), 'database', 'Initial empty window first
 assert.match(source, /UserConfig.getInstance\(globalMediaSearchAccount\).getClientUserId\(\)/, 'Budget isolates reused account slots');
 assert.match(body('saveGlobalMediaHistoryBudget'), /putLong\(key \+ "_at", System.currentTimeMillis\(\)\)/);
 assert.doesNotMatch(body('restoreGlobalMediaHistoryBudget'), /\.edit\(/, 'Opening cannot slide budget expiry');
-assert.match(body('requestGlobalMediaDatabasePage'), /!replace && !newer && !globalMediaOlderHasMore/, 'DB request must not wait for coverage while cached pages remain');
+assert.doesNotMatch(body('requestGlobalMediaDatabasePage'), /globalMediaCoverageWaiting\s*=|startGlobalMediaDialogBatch/, 'DB request must not take ownership of network coverage');
 assert.match(body('onGlobalMediaSyncRoundFinished'), /if \(!isGlobalMediaCoverageComplete\(0\) && globalMediaHistoryPagesRemaining > 0\)/, 'Background coverage repair must continue even when cached pages remain');
 const coverageDecision = body('onGlobalMediaSyncRoundFinished').match(/if \(!isGlobalMediaCoverageComplete\(0\) && globalMediaHistoryPagesRemaining > 0\) \{[\s\S]*?\n        \}/)[0];
 const repair = new Function('coverage', 'budget', 'cachedHasMore', `
@@ -67,6 +67,7 @@ const repair = new Function('coverage', 'budget', 'cachedHasMore', `
     function isGlobalMediaCoverageComplete() { return coverage; }
     function startGlobalMediaDialogBatch() { repaired = true; }
     function requestGlobalMediaDatabasePage() {}
+    function flushGlobalMediaCacheDirty() {}
     (() => { ${coverageDecision} })();
     return repaired;
 `);
@@ -74,7 +75,7 @@ assert.equal(repair(false, 50, true), true, 'Cached content cannot postpone back
 assert.equal(repair(false, 0, true), false, 'Restored exhausted budget pauses instead of silently renewing');
 assert.equal(repair(true, 50, true), false, 'Complete coverage must not scan history unnecessarily');
 const network = body('dispatchGlobalMediaDialogSearches');
-const putAt = network.indexOf('storage.putGlobalMediaSearchMessages(');
+const putAt = network.indexOf('storage.putGlobalMediaSearchMessagesWithCount(');
 assert.ok(putAt > 0);
 const storedCallback = network.slice(putAt);
 assert.match(storedCallback, /generation != requestIndex[\s\S]*return;[\s\S]*saveGlobalMediaHistoryBudget\(\)/, 'Delayed old-UI storage completion must not mutate new-session budget');

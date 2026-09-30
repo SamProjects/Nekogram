@@ -73,6 +73,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 
 import me.vkryl.core.BitwiseUtils;
 
@@ -11558,14 +11559,43 @@ public class MessagesStorage extends BaseController {
     }
 
     public void putGlobalMediaSearchMessages(ArrayList<TLRPC.Message> messages, long dialogId, GlobalMediaSearchProgress progress, Consumer<Boolean> callback) {
+        putGlobalMediaSearchMessagesWithCount(messages, dialogId, progress,
+                (stored, inserted) -> { if (callback != null) callback.accept(stored); });
+    }
+
+    public void putGlobalMediaSearchMessagesWithCount(ArrayList<TLRPC.Message> messages, long dialogId,
+                                                       GlobalMediaSearchProgress progress, BiConsumer<Boolean, Integer> callback) {
         storageQueue.postRunnable(() -> {
             boolean stored = false;
             boolean savepoint = false;
+            int inserted = 0;
             try {
                 ensureGlobalMediaSearchTables();
                 database.executeFast("SAVEPOINT global_media_page").stepThis().dispose();
                 savepoint = true;
                 if (messages != null && !messages.isEmpty()) {
+                    HashSet<Integer> expectedIds = new HashSet<>();
+                    for (TLRPC.Message message : messages) {
+                        if (message != null && message.id > 0 && MediaDataController.canAddMessageToMedia(message)
+                                && MediaDataController.getMediaType(message) == MediaDataController.MEDIA_PHOTOVIDEO
+                                && !MessageObject.isEphemeral(message)) {
+                            expectedIds.add(message.id);
+                        }
+                    }
+                    StringBuilder ids = new StringBuilder();
+                    for (Integer messageId : expectedIds) {
+                        if (ids.length() > 0) ids.append(',');
+                        ids.append(messageId);
+                    }
+                    HashSet<Integer> previouslyStoredIds = new HashSet<>();
+                    if (!expectedIds.isEmpty()) {
+                        SQLiteCursor cursor = database.queryFinalized("SELECT m.mid FROM media_v4 m INNER JOIN messages_v2 g ON g.uid = m.uid AND g.mid = m.mid WHERE m.uid = " + dialogId + " AND m.type = " + MediaDataController.MEDIA_PHOTOVIDEO + " AND m.mid IN (" + ids + ")");
+                        try {
+                            while (cursor.next()) previouslyStoredIds.add(cursor.intValue(0));
+                        } finally {
+                            cursor.dispose();
+                        }
+                    }
                     for (TLRPC.Message message : messages) {
                         message.dialog_id = dialogId;
                         if (message.id <= 0 || !MediaDataController.canAddMessageToMedia(message)
@@ -11614,23 +11644,8 @@ public class MessagesStorage extends BaseController {
                         }
                     }
 
-                    HashSet<Integer> expectedIds = new HashSet<>();
-                    for (TLRPC.Message message : messages) {
-                        if (message.id > 0 && MediaDataController.canAddMessageToMedia(message)
-                                && MediaDataController.getMediaType(message) == MediaDataController.MEDIA_PHOTOVIDEO
-                                && !MessageObject.isEphemeral(message)) {
-                            expectedIds.add(message.id);
-                        }
-                    }
                     HashSet<Integer> storedIds = new HashSet<>();
                     if (!expectedIds.isEmpty()) {
-                        StringBuilder ids = new StringBuilder();
-                        for (Integer messageId : expectedIds) {
-                            if (ids.length() > 0) {
-                                ids.append(',');
-                            }
-                            ids.append(messageId);
-                        }
                         SQLiteCursor cursor = database.queryFinalized("SELECT m.mid FROM media_v4 m INNER JOIN messages_v2 g ON g.uid = m.uid AND g.mid = m.mid WHERE m.uid = " + dialogId + " AND m.type = " + MediaDataController.MEDIA_PHOTOVIDEO + " AND m.mid IN (" + ids + ")");
                         try {
                             while (cursor.next()) {
@@ -11641,6 +11656,9 @@ public class MessagesStorage extends BaseController {
                         }
                     }
                     stored = expectedIds.size() == storedIds.size() && storedIds.containsAll(expectedIds);
+                    if (stored) {
+                        inserted = storedIds.size() - previouslyStoredIds.size();
+                    }
                 } else {
                     stored = true;
                 }
@@ -11665,8 +11683,9 @@ public class MessagesStorage extends BaseController {
                 checkSQLException(e);
             }
             boolean storedFinal = stored;
+            int insertedFinal = stored ? inserted : 0;
             if (callback != null) {
-                AndroidUtilities.runOnUIThread(() -> callback.accept(storedFinal));
+                AndroidUtilities.runOnUIThread(() -> callback.accept(storedFinal, insertedFinal));
             }
         });
     }

@@ -19,6 +19,8 @@ const run = new Function('globalMediaDialogSearches', 'inFlight', 'targetDate = 
     const generation = 1, requestIndex = 1, globalMediaSearchGeneration = 1;
     let globalMediaDialogBatch = null, globalMediaRequestsInFlight = inFlight;
     let globalMediaBatchCursor = 0, globalMediaBatchCompleted = 0, isLoading = false;
+    let globalMediaCoverageWaiting = true, globalMediaCacheDirty = false;
+    const globalMediaPageRequestInFlight = false, globalMediaPendingPage = null;
     const globalMediaHistoryPagesRemaining = budget;
     function getGlobalMediaCoverageTargetDate() { return targetDate; }
     const messages = { isEmpty: () => true }, emptyView = { showProgress() {} };
@@ -27,8 +29,9 @@ const run = new Function('globalMediaDialogSearches', 'inFlight', 'targetDate = 
     function dispatchGlobalMediaDialogSearches() { dispatched = true; }
     function showGlobalMediaSyncProgress() {}
     function updateGlobalMediaSyncLabel() {}
+    function flushGlobalMediaCacheDirty() {}
     (() => { ${body} })();
-    return { peers: globalMediaDialogBatch?.map(x => x.dialogId) ?? [], finished, dispatched };
+    return { peers: globalMediaDialogBatch?.map(x => x.dialogId) ?? [], finished, dispatched, waiting: globalMediaCoverageWaiting };
 `);
 function peer(dialogId, floor, options = {}) {
     return { dialogId, progress: { initialized: true, catchingUp: false, historyEndReached: false, headFloorDate: floor, ...options } };
@@ -37,12 +40,12 @@ assert.deepEqual(run([peer(1, 300), peer(2, 200), peer(3, 10)], 0).peers, [1], '
 assert.deepEqual(run([peer(1, 300), peer(2, 300), peer(3, 10)], 0).peers, [1, 2], 'Equal frontiers must both advance');
 assert.deepEqual(run([peer(1, 300), peer(2, 0, { initialized: false }), peer(3, 10, { catchingUp: true })], 0).peers, [2, 3], 'Unknown heads and catch-up gaps have priority over history');
 assert.deepEqual(run([peer(1, 300, { historyEndReached: true }), peer(2, 200)], 0).peers, [2]);
-assert.deepEqual(run([peer(1, 300, { historyEndReached: true })], 0), { peers: [], finished: true, dispatched: false });
-assert.deepEqual(run([peer(1, 300)], 1), { peers: [], finished: false, dispatched: false }, 'Never overlap a request or storage write');
+assert.deepEqual(run([peer(1, 300, { historyEndReached: true })], 0), { peers: [], finished: false, dispatched: false, waiting: false });
+assert.deepEqual(run([peer(1, 300)], 1), { peers: [], finished: false, dispatched: false, waiting: true }, 'Never overlap a request or storage write');
 assert.deepEqual(run([peer(1, 300), peer(2, 200)], 0, 250).peers, [1], 'Only fill peers that have not covered the displayed date range');
 assert.deepEqual(run([peer(1, 300)], 0, 300).peers, [1], 'A tied boundary second still needs coverage');
-assert.equal(run([peer(1, 300)], 0, 400).finished, true, 'Stop once dynamic window target is covered');
-assert.equal(run([peer(1, 300)], 0, 200, 0).finished, true, 'History work must stop at its budget');
+assert.equal(run([peer(1, 300)], 0, 400).waiting, false, 'Stop once dynamic window target is covered');
+assert.equal(run([peer(1, 300)], 0, 200, 0).waiting, false, 'History work must stop at its budget');
 console.log('PASS: production scheduler control flow, newest-gap priority, head repair, tied frontiers, true-end and in-flight guards');
 
 // Exercise production error handling with unavailable peers between healthy peers.

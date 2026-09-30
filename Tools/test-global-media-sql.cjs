@@ -64,6 +64,24 @@ assert.deepEqual(loaded.map(key), expected.map(key), 'Global seek pages must hav
 assert.equal(new Set(loaded.map(key)).size, loaded.length);
 assert.ok(loaded.slice(0, 1560).every(row => row.date >= recent - 1300), 'Old channel must not precede recent media from busy group');
 
+// Compose production seek pages with a bounded window and a live insert in its
+// middle, then reverse direction. This catches cursor/window interaction that
+// isolated one-page assertions cannot see.
+let windowRows = page({ limit: 1000 }).rows;
+windowRows = windowRows.concat(page({ cursor: windowRows.at(-1), limit: 100 }).rows);
+windowRows = windowRows.slice(100); // Normal 1000-message tail window after older paging.
+const liveDate = expected[500].date;
+put.run(60000, -101, liveDate, 0);
+const liveRow = db.prepare('SELECT uid,mid,date FROM media_v4 WHERE uid=-101 AND mid=60000').get();
+windowRows.push(liveRow);
+windowRows.sort((a, b) => b.date - a.date || b.uid - a.uid || b.mid - a.mid);
+windowRows = windowRows.slice(0, 1000); // Live middle insert evicts the oldest row.
+const newerRows = page({ cursor: windowRows[0], newer: true, limit: 100 }).rows.slice().reverse();
+windowRows = newerRows.concat(windowRows).slice(0, 1000);
+const currentOrder = db.prepare('SELECT uid,mid,date FROM media_v4 WHERE uid IN (-101,-202,-303,-404) AND type=0 AND mid>0 ORDER BY date DESC,uid DESC,mid DESC').all();
+assert.deepEqual(windowRows.map(key), currentOrder.slice(0, 1000).map(key), 'Trim, live middle insert and reverse seek remain contiguous');
+assert.equal(new Set(windowRows.map(key)).size, 1000, 'Reverse seek cannot duplicate the live item');
+
 // A global synchronization frontier must hide the much older channel.
 const covered = page({ min: recent - 200 });
 assert.ok(covered.rows.every(row => row.date >= recent - 200));

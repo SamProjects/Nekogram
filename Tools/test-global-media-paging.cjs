@@ -36,7 +36,8 @@ assert.ok(!newer.includes('globalMediaCoverageWaiting'), 'Cached newer paging mu
 assert.ok(newer.includes('globalMediaPendingPage != null'));
 const finished = method('onGlobalMediaSyncRoundFinished');
 assert.ok(!/globalMediaPage(?:Newer|Replace)\s*=/.test(finished), 'Network completion cannot mutate local request direction');
-assert.ok(finished.includes('requestGlobalMediaDatabasePage(generation, false, rawMessages.isEmpty())'));
+assert.ok(finished.includes('flushGlobalMediaCacheDirty(generation)'));
+assert.ok(!finished.includes('globalMediaOlderHasMore = true'), 'Network cannot change DB EOF');
 const callback = method('onGlobalMediaDatabasePage');
 assert.ok(callback.indexOf('token != globalMediaPageRequestToken') < callback.indexOf('globalMediaPageRequestInFlight = false'));
 assert.ok(callback.includes('generation != requestIndex') && callback.includes('generation != globalMediaSearchGeneration'));
