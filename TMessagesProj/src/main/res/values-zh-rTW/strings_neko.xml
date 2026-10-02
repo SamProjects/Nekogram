@@ -330,4 +330,5 @@
     <string name="JsonCopyValue">複製值</string>
     <!-- Accessibility -->
     <string name="AccessibilitySettings">無障礙設定</string>
+    <string name="GroupSpeech">群組發言</string>
 </resources>

@@ -358,4 +358,5 @@
 
     <!-- Accessibility -->
     <string name="AccessibilitySettings">Accessibility settings</string>
+    <string name="GroupSpeech">Group messages</string>
 </resources>

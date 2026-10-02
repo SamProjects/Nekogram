@@ -353,4 +353,5 @@
     <string name="ExternalStreamingProtocolHttp">HTTP</string>
     <!-- Accessibility -->
     <string name="AccessibilitySettings">无障碍设置</string>
+    <string name="GroupSpeech">群组发言</string>
 </resources>
