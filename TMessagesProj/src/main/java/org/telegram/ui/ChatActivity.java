@@ -1284,6 +1284,7 @@ public class ChatActivity extends BaseFragment implements
 
     public final static int OPTION_VIEW_STATISTICS = 115;
     public final static int OPTION_WELCOME_REVERT = 116;
+    public final static int OPTION_GROUP_SPEECH = 117;
 
     private final static int[] allowedNotificationsDuringChatListAnimations = new int[]{
             NotificationCenter.messagesRead,
@@ -34799,6 +34800,16 @@ public class ChatActivity extends BaseFragment implements
                     }
                 });
                 break;
+            } case OPTION_GROUP_SPEECH: {
+                final TLRPC.Peer sender = selectedObject.messageOwner.from_id;
+                if (sender != null && sender.user_id != 0) {
+                    final TLRPC.User user = getMessagesController().getUser(sender.user_id);
+                    if (user != null) {
+                        searchingReaction = null;
+                        openSearchWithUser(user);
+                    }
+                }
+                break;
             } case OPTION_DETAILS: {
                 presentFragment(new MessageDetailsActivity(selectedObject));
                 break;
@@ -47403,6 +47414,19 @@ public class ChatActivity extends BaseFragment implements
                 options.add(OPTION_DELETE);
                 icons.add(deleteIconRes);
             }
+        }
+
+        // Reuse the existing sender filter; never search a forwarded message's original author.
+        final TLRPC.Peer sender = message.messageOwner.from_id;
+        if (chatMode == MODE_DEFAULT && currentChat != null
+                && (!ChatObject.isChannel(currentChat) || currentChat.megagroup)
+                && (threadMessageId == 0 || isTopic)
+                && !message.isSponsored() && !isEphemeral && message.getId() > 0
+                && sender != null && sender.user_id != 0
+                && getMessagesController().getUser(sender.user_id) != null) {
+            items.add(LocaleController.getString(R.string.GroupSpeech));
+            options.add(OPTION_GROUP_SPEECH);
+            icons.add(R.drawable.msg_usersearch);
         }
 
         if (showWelcomeMessageRevertOption(primaryMessage)) {
