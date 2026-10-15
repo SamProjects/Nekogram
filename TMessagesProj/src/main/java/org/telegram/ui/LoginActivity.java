@@ -220,6 +220,7 @@ import tw.nekomimi.nekogram.EditTextAutoFill;
 import tw.nekomimi.nekogram.QrView;
 import tw.nekomimi.nekogram.helpers.PasscodeHelper;
 import tw.nekomimi.nekogram.helpers.PopupHelper;
+import tw.nekomimi.nekogram.passkey.LoginQrScanner;
 
 @SuppressLint("HardwareIds")
 public class LoginActivity extends BaseFragment implements NotificationCenter.NotificationCenterDelegate {
@@ -762,11 +763,42 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
         moreButtonView.setIcon(R.drawable.ic_ab_other);
         moreButtonView.addSubItem(0, R.drawable.outline_shield_plain_24, getString(R.string.ProxySettings));
         moreButtonView.addSubItem(1, R.drawable.msg_qrcode, getString(R.string.QRLoginTitle));
+        moreButtonView.addSubItem(2, R.drawable.profile_qr_scan_24, getString(R.string.ScanQrCode));
         moreButtonView.setDelegate(id -> {
             if (id == 0) {
                 presentFragment(new ProxyListActivity());
             } else if (id == 1) {
                 setPage(VIEW_QR_LOGIN, true, null, false);
+            } else if (id == 2) {
+                LoginQrScanner.showScanner(this, (authorization, err) -> {
+                    if ("CANCELLED".equals(err)) return;
+                    if (authorization instanceof TLRPC.TL_auth_authorization auth) {
+                        onAuthSuccess(auth);
+                        return;
+                    }
+                    if (err != null && err.contains("SESSION_PASSWORD_NEEDED")) {
+                        var req = new TL_account.getPassword();
+                        ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
+                            showDoneButton(false, true);
+                            if (error == null) {
+                                var password = (TL_account.Password) response;
+                                if (!TwoStepVerificationActivity.canHandleCurrentPassword(password, true)) {
+                                    AlertsCreator.showUpdateAppAlert(getParentActivity(), getString(R.string.UpdateAppAlert), true);
+                                    return;
+                                }
+                                var bundle = new Bundle();
+                                var data = new SerializedData(password.getObjectSize());
+                                password.serializeToStream(data);
+                                bundle.putString("password", Utilities.bytesToHex(data.toByteArray()));
+                                setPage(VIEW_PASSWORD, true, bundle, false);
+                            } else {
+                                needShowAlert(getString(R.string.RestorePasswordNoEmailTitle), error.text);
+                            }
+                        }), ConnectionsManager.RequestFlagFailOnServerErrors | ConnectionsManager.RequestFlagWithoutLogin);
+                    } else {
+                        BulletinFactory.of(slideViewsContainer, null).showForError(err);
+                    }
+                });
             }
         });
         moreButtonView.setSubMenuOpenSide(1);
@@ -4244,13 +4276,25 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                 nextPressed = false;
                 if (error == null) {
                     nextCodeParams = params;
-                    nextCodeAuth = (TLRPC.TL_auth_sentCode) response;
-                    if (nextCodeAuth.type instanceof TLRPC.TL_auth_sentCodeTypeSmsPhrase) {
-                        nextType = AUTH_TYPE_PHRASE;
-                    } else if (nextCodeAuth.type instanceof TLRPC.TL_auth_sentCodeTypeSmsWord) {
-                        nextType = AUTH_TYPE_WORD;
+                    if (response instanceof TLRPC.TL_auth_sentCode) {
+                        nextCodeAuth = (TLRPC.TL_auth_sentCode) response;
+                        if (nextCodeAuth.type instanceof TLRPC.TL_auth_sentCodeTypeSmsPhrase) {
+                            nextType = AUTH_TYPE_PHRASE;
+                        } else if (nextCodeAuth.type instanceof TLRPC.TL_auth_sentCodeTypeSmsWord) {
+                            nextType = AUTH_TYPE_WORD;
+                        }
+                        fillNextCodeParams(nextCodeParams, nextCodeAuth);
+                    } else if (response instanceof TLRPC.TL_auth_sentCodePaymentRequired) {
+                        final TLRPC.TL_auth_sentCodePaymentRequired auth = (TLRPC.TL_auth_sentCodePaymentRequired) response;
+                        params.putString("product", auth.store_product);
+                        params.putString("phoneHash", auth.phone_code_hash);
+                        params.putString("support_email_address", auth.support_email_address);
+                        params.putString("support_email_subject", auth.support_email_subject);
+                        params.putString("currency", auth.currency);
+                        params.putInt("premium_days", auth.premium_days);
+                        params.putLong("amount", auth.amount);
+                        setPage(VIEW_PAY, true, params, true);
                     }
-                    fillNextCodeParams(nextCodeParams, nextCodeAuth);
                 } else {
                     if (error.text != null) {
                         if (error.text.contains("PHONE_NUMBER_INVALID")) {

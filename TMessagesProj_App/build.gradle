@@ -2,12 +2,15 @@ import com.android.build.api.variant.FilterConfiguration
 
 plugins {
     id 'com.android.application'
+    id 'androidx.baselineprofile'
     id 'org.telegram.build-app-plugin'
     id 'io.sentry.android.gradle'
 }
 
 dependencies {
     implementation project(':TMessagesProj')
+    implementation 'androidx.profileinstaller:profileinstaller:1.4.1'
+    baselineProfile project(':baselineprofile')
 }
 
 sentry {
@@ -49,6 +52,12 @@ android {
         }
     }
 
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     buildTypes {
         debug {
             if (localProperties.getProperty("storeFile") != null) {
@@ -79,12 +88,6 @@ android {
         multiDexEnabled true
 
         manifestPlaceholders = [MAPS_API_KEY: localProperties.get("mapsApiKey")]
-    }
-
-    bundle {
-        language {
-            enableSplit = false
-        }
     }
 
     splits.abi {

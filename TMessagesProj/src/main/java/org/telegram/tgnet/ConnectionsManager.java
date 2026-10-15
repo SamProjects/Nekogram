@@ -11,6 +11,7 @@ import android.os.Build;
 import android.os.SystemClock;
 import android.text.TextUtils;
 import android.util.Base64;
+import android.util.Pair;
 
 import androidx.annotation.Keep;
 
@@ -40,9 +41,9 @@ import org.telegram.messenger.SharedConfig;
 import org.telegram.messenger.StatsController;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.Utilities;
-import org.telegram.proxy.WebProxyConnectionTester;
-import org.telegram.proxy.WebProxyTransport;
-import org.telegram.proxy.ProxySettings;
+import org.telegram.utils.proxy.WebProxyConnectionTester;
+import org.telegram.utils.proxy.WebProxyTransport;
+import org.telegram.utils.proxy.ProxySettings;
 import org.telegram.ui.Components.VideoPlayer;
 import org.telegram.ui.LoginActivity;
 
@@ -77,8 +78,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.net.ssl.SSLException;
-
-@OptIn(markerClass = UnstableApi.class)
 public class ConnectionsManager extends BaseController {
 
     public final static int ConnectionTypeGeneric = 1;
@@ -86,6 +85,8 @@ public class ConnectionsManager extends BaseController {
     public final static int ConnectionTypeUpload = 4;
     public final static int ConnectionTypePush = 8;
     public final static int ConnectionTypeDownload2 = ConnectionTypeDownload | (1 << 16);
+    // Keep in sync with DOWNLOAD_CONNECTIONS_COUNT in tgnet/Defines.h.
+    public final static int DownloadConnectionsCount = 8;
 
     public final static int FileTypePhoto = 0x01000000;
     public final static int FileTypeVideo = 0x02000000;
@@ -103,6 +104,8 @@ public class ConnectionsManager extends BaseController {
     public final static int RequestFlagDoNotWaitFloodWait = 1024;
     public final static int RequestFlagListenAfterCancel = 2048;
     public final static int RequestFlagFailOnServerErrorsExceptFloodWait = 65536;
+    public final static int RequestFlagSmallDownload = 131072;
+    public final static int RequestFlagDownloadByteBudget = 262144;
 
     public final static int ConnectionStateConnecting = 1;
     public final static int ConnectionStateWaitingForNetwork = 2;
@@ -172,15 +175,15 @@ public class ConnectionsManager extends BaseController {
 
     private static class ResolvedDomain {
 
-        public ArrayList<String> addresses;
+        public ArrayList<Pair<String, Boolean>> addresses;
         long ttl;
 
-        public ResolvedDomain(ArrayList<String> a, long t) {
+        public ResolvedDomain(ArrayList<Pair<String, Boolean>> a, long t) {
             addresses = a;
             ttl = t;
         }
 
-        public String getAddress() {
+        public Pair<String, Boolean> getAddress() {
             return addresses.get(Utilities.random.nextInt(addresses.size()));
         }
     }
@@ -476,7 +479,18 @@ public class ConnectionsManager extends BaseController {
                     FileLog.e(e);
                 }
             }, onQuickAck, onWriteToSocket);
-            native_sendRequest(currentAccount, buffer.address, flags, datacenterId, connectionType, immediate, requestToken);
+            int downloadSize = 0;
+            // Only FileLoadOperation opts in. Live call segments retain their existing scheduling.
+            if ((flags & RequestFlagDownloadByteBudget) != 0 && (connectionType & 0xffff) == ConnectionTypeDownload) {
+                if (object instanceof TLRPC.TL_upload_getFile) {
+                    downloadSize = ((TLRPC.TL_upload_getFile) object).limit;
+                } else if (object instanceof TLRPC.TL_upload_getWebFile) {
+                    downloadSize = ((TLRPC.TL_upload_getWebFile) object).limit;
+                } else if (object instanceof TLRPC.TL_upload_getCdnFile) {
+                    downloadSize = ((TLRPC.TL_upload_getCdnFile) object).limit;
+                }
+            }
+            native_sendRequest(currentAccount, buffer.address, flags, datacenterId, connectionType, immediate, requestToken, downloadSize);
         } catch (Exception e) {
             FileLog.e(e);
         }
@@ -737,6 +751,14 @@ public class ConnectionsManager extends BaseController {
         return lastPauseTime;
     }
 
+    public byte[] exportAuthKey(int dcId) {
+        return native_exportAuthKey(currentAccount, dcId);
+    }
+
+    public void importAuthKey(int dcId, byte[] authKey) {
+        native_importAuthKey(currentAccount, dcId, authKey);
+    }
+
     public long checkProxy(ProxySettings settings, RequestTimeDelegate requestTimeDelegate) {
         if (settings == null || !settings.isValid()) {
             return 0;
@@ -791,15 +813,16 @@ public class ConnectionsManager extends BaseController {
         }
     }
 
+    @Keep
     public static void onUnparsedMessageReceived(long address, final int currentAccount, long messageId) {
         try {
             NativeByteBuffer buff = NativeByteBuffer.wrap(address);
             buff.setDataSourceType(TLDataSourceType.NETWORK);
             buff.reused = true;
             int constructor = buff.readInt32(true);
-            final TLObject message = TLClassStore.Instance().TLdeserialize(buff, constructor, true);
+            final TLRPC.Updates message = TLRPC.Updates.TLdeserialize(buff, constructor, true);
             //FileLog.dumpUnparsedMessage(message, messageId, currentAccount);
-            if (message instanceof TLRPC.Updates) {
+            if (message != null) {
                 if (BuildVars.LOGS_ENABLED) {
                     FileLog.d("java received " + message);
                 }
@@ -902,7 +925,8 @@ public class ConnectionsManager extends BaseController {
         AndroidUtilities.runOnUIThread(() -> {
             ResolvedDomain resolvedDomain = dnsCache.get(hostName);
             if (resolvedDomain != null && SystemClock.elapsedRealtime() - resolvedDomain.ttl < 5 * 60 * 1000) {
-                native_onHostNameResolved(hostName, address, resolvedDomain.getAddress());
+                Pair<String, Boolean> resolved = resolvedDomain.getAddress();
+                native_onHostNameResolved(hostName, address, resolved.first, resolved.second);
             } else {
                 ResolveHostByNameTask task = resolvingHostnameTasks.get(hostName);
                 if (task == null) {
@@ -911,7 +935,7 @@ public class ConnectionsManager extends BaseController {
                         task.executeOnExecutor(DNS_THREAD_POOL_EXECUTOR, null, null, null);
                     } catch (Throwable e) {
                         FileLog.e(e);
-                        native_onHostNameResolved(hostName, address, "");
+                        native_onHostNameResolved(hostName, address, "", false);
                         return;
                     }
                     resolvingHostnameTasks.put(hostName, task);
@@ -1000,7 +1024,7 @@ public class ConnectionsManager extends BaseController {
     public static native int native_getCurrentDatacenterId(int currentAccount);
     public static native long native_getCurrentAuthKeyId(int currentAccount);
     public static native int native_getTimeDifference(int currentAccount);
-    public static native void native_sendRequest(int currentAccount, long object, int flags, int datacenterId, int connectionType, boolean immediate, int requestToken);
+    public static native void native_sendRequest(int currentAccount, long object, int flags, int datacenterId, int connectionType, boolean immediate, int requestToken, int downloadSize);
     public static native void native_cancelRequest(int currentAccount, int token, boolean notifyServer);
     public static native void native_cleanUp(int currentAccount, boolean resetKeys);
     public static native void native_cancelRequestsForGuid(int currentAccount, int guid);
@@ -1017,12 +1041,14 @@ public class ConnectionsManager extends BaseController {
     public static native void native_setPushConnectionEnabled(int currentAccount, boolean value);
     public static native void native_applyDnsConfig(int currentAccount, long address, String phone, int date);
     public static native long native_checkProxy(int currentAccount, String address, int port, String username, String password, String secret, RequestTimeDelegate requestTimeDelegate);
-    public static native void native_onHostNameResolved(String host, long address, String ip);
+    public static native void native_onHostNameResolved(String host, long address, String ip, boolean ipv6);
     public static native void native_discardConnection(int currentAccount, int datacenterId, int connectionType);
     public static native void native_failNotRunningRequest(int currentAccount, int token);
     public static native void native_receivedIntegrityCheckClassic(int currentAccount, int requestToken, String nonce, String token);
     public static native void native_receivedCaptchaResult(int currentAccount, int[] requestTokens, String token);
     public static native boolean native_isGoodPrime(byte[] prime, int g);
+    public static native byte[] native_exportAuthKey(int currentAccount, int dcId);
+    public static native void native_importAuthKey(int currentAccount, int dcId, byte[] authKey);
 
 
     public static boolean testNativeTlScheme(NativeByteBuffer buffer, INativeTlTest test) {
@@ -1185,9 +1211,9 @@ public class ConnectionsManager extends BaseController {
                     JSONArray array = jsonObject.getJSONArray("Answer");
                     int len = array.length();
                     if (len > 0) {
-                        ArrayList<String> addresses = new ArrayList<>(len);
+                        ArrayList<Pair<String, Boolean>> addresses = new ArrayList<>(len);
                         for (int a = 0; a < len; a++) {
-                            addresses.add(array.getJSONObject(a).getString("data"));
+                            addresses.add(Pair.create(array.getJSONObject(a).getString("data"), false));
                         }
                         return new ResolvedDomain(addresses, SystemClock.elapsedRealtime());
                     }
@@ -1213,9 +1239,11 @@ public class ConnectionsManager extends BaseController {
             }
             if (!done) {
                 try {
-                    InetAddress address = InetAddress.getByName(currentHostName);
-                    ArrayList<String> addresses = new ArrayList<>(1);
-                    addresses.add(address.getHostAddress());
+                    InetAddress[] address = InetAddress.getAllByName(currentHostName);
+                    ArrayList<Pair<String, Boolean>> addresses = new ArrayList<>(1);
+                    for (InetAddress a : address) {
+                        addresses.add(Pair.create(a.getHostAddress(), a instanceof Inet6Address));
+                    }
                     return new ResolvedDomain(addresses, SystemClock.elapsedRealtime());
                 } catch (Exception e) {
                     FileLog.e(e, false);
@@ -1229,11 +1257,12 @@ public class ConnectionsManager extends BaseController {
             if (result != null) {
                 dnsCache.put(currentHostName, result);
                 for (int a = 0, N = addresses.size(); a < N; a++) {
-                    native_onHostNameResolved(currentHostName, addresses.get(a), result.getAddress());
+                    Pair<String, Boolean> resolved = result.getAddress();
+                    native_onHostNameResolved(currentHostName, addresses.get(a), resolved.first, resolved.second);
                 }
             } else {
                 for (int a = 0, N = addresses.size(); a < N; a++) {
-                    native_onHostNameResolved(currentHostName, addresses.get(a), "");
+                    native_onHostNameResolved(currentHostName, addresses.get(a), "", false);
                 }
             }
             resolvingHostnameTasks.remove(currentHostName);
