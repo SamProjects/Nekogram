@@ -11980,6 +11980,19 @@ public class MessagesController extends BaseController implements NotificationCe
             extendUserChatFromMessage(dialogId, c, messagesRes.messages);
             chatsDict.put(c.id, c);
         }
+        // Storage may discard an incomplete window while resCount still counts the
+        // rows it read. A jump needs the requested message, not just nearby rows.
+        boolean missingRequestedMessage = false;
+        if (isCache && needProcess && load_type == LOAD_AROUND_MESSAGE && max_id > 0 &&
+                (mode == ChatActivity.MODE_DEFAULT || mode == ChatActivity.MODE_SAVED)) {
+            missingRequestedMessage = true;
+            for (int a = 0; a < messagesRes.messages.size(); a++) {
+                if (messagesRes.messages.get(a).id == max_id) {
+                    missingRequestedMessage = false;
+                    break;
+                }
+            }
+        }
         if (mode == ChatActivity.MODE_SCHEDULED) {
             reload = ((SystemClock.elapsedRealtime() - lastScheduledServerQueryTime.get(dialogId, 0L)) > 60 * 1000);
         } else if (mode == ChatActivity.MODE_QUICK_REPLIES) {
@@ -11987,9 +12000,9 @@ public class MessagesController extends BaseController implements NotificationCe
         } else if (mode == ChatActivity.MODE_WELCOME_MESSAGES) {
             reload = ((SystemClock.elapsedRealtime() - lastWelcomeMessagesServerQueryTime.get(dialogId, 0L)) > 60 * 1000);
         } else if (mode == ChatActivity.MODE_SAVED) {
-            reload = resCount == 0 && (!isInitialLoading || (SystemClock.elapsedRealtime() - lastSavedServerQueryTime.get(threadMessageId, 0L)) > 60 * 1000 || isCache);
+            reload = missingRequestedMessage || resCount == 0 && (!isInitialLoading || (SystemClock.elapsedRealtime() - lastSavedServerQueryTime.get(threadMessageId, 0L)) > 60 * 1000 || isCache);
         } else {
-            reload = resCount == 0 && (!isInitialLoading || (SystemClock.elapsedRealtime() - lastServerQueryTime.get(dialogId, 0L)) > 60 * 1000 || (isCache && isTopic));
+            reload = missingRequestedMessage || resCount == 0 && (!isInitialLoading || (SystemClock.elapsedRealtime() - lastServerQueryTime.get(dialogId, 0L)) > 60 * 1000 || (isCache && isTopic));
         }
         if (!DialogObject.isEncryptedDialog(dialogId) && isCache && reload) {
             if (mode == ChatActivity.MODE_SCHEDULED) {
@@ -12050,7 +12063,7 @@ public class MessagesController extends BaseController implements NotificationCe
             }
             final long finalHash = hash;
             AndroidUtilities.runOnUIThread(() -> loadMessagesInternal(dialogId, mergeDialogId, false, count, load_type == LOAD_FROM_UNREAD && queryFromServer ? first_unread : max_id, offset_date, false, 0, classGuid, load_type, last_message_id, mode, threadMessageId, loadIndex, first_unread, unread_count, last_date, queryFromServer, mentionsCount, true, needProcess, isTopic, loaderLogger, finalHash));
-            if (messagesRes.messages.isEmpty()) {
+            if (messagesRes.messages.isEmpty() || missingRequestedMessage) {
                 return;
             }
         }
