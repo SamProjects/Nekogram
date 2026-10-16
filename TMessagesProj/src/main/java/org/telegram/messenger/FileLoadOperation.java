@@ -864,6 +864,9 @@ public class FileLoadOperation {
     }
 
     public boolean start(final FileLoadOperationStream stream, final long streamOffset, final boolean streamPriority) {
+        if (cancellationRequested) {
+            return false;
+        }
         startTime = System.currentTimeMillis();
         updateParams();
         if (currentDownloadChunkSize == 0) {
@@ -1387,11 +1390,18 @@ public class FileLoadOperation {
         return preloadFinished;
     }
 
+    private volatile boolean cancellationRequested;
+
+    public boolean isCancelled() {
+        return cancellationRequested;
+    }
+
     public void cancel() {
         cancel(false);
     }
 
     private void cancel(boolean deleteFiles) {
+        cancellationRequested = true;
         Utilities.stageQueue.postRunnable(() -> {
             cancelOnStage(deleteFiles);
         });
@@ -1400,6 +1410,8 @@ public class FileLoadOperation {
     private void cancelOnStage(boolean deleteFiles) {
         if (state != stateFinished && state != stateFailed) {
             state = stateCancelling;
+            // Wake blocked readers now, rather than after network cancellation acknowledgements.
+            notifyStreamListeners();
             cancelRequests(() -> {
                 if (state == stateCancelling) {
                     onFail(false, 1);
@@ -2298,6 +2310,9 @@ public class FileLoadOperation {
     }
 
     protected void startDownloadRequest(int useConnectionType) {
+        if (cancellationRequested) {
+            return;
+        }
         Utilities.stageQueue.cancelRunnable(pacedDownloadRequest);
         if (BuildVars.DEBUG_PRIVATE_VERSION) {
             if (Utilities.stageQueue != null && Utilities.stageQueue.getHandler() != null && Thread.currentThread() != Utilities.stageQueue.getHandler().getLooper().getThread()) {

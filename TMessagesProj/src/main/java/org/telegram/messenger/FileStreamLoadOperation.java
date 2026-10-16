@@ -28,6 +28,7 @@ import org.telegram.tgnet.TLRPC;
 
 import java.io.EOFException;
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.io.UnsupportedEncodingException;
@@ -86,6 +87,7 @@ public class FileStreamLoadOperation implements DataSource, FileLoadOperationStr
 
     @Override
     public long open(DataSpec dataSpec) throws IOException {
+        checkDownloadCancelled();
         uri = dataSpec.uri;
         isNetwork = true;
         transferInitializing(dataSpec);
@@ -203,6 +205,7 @@ public class FileStreamLoadOperation implements DataSource, FileLoadOperationStr
 
     @Override
     public int read(byte[] buffer, int offset, int readLength) throws IOException {
+        checkDownloadCancelled();
         if (readLength == 0) {
 //            FileLog.e("FileStreamLoadOperation " + document.id + " read 0 return");
             return 0;
@@ -227,10 +230,12 @@ public class FileStreamLoadOperation implements DataSource, FileLoadOperationStr
                     readLength = (int) bytesRemaining;
                 }
                 while ((availableLength == 0 && opened) || file == null) {
+                    checkDownloadCancelled();
                     availableLength = (int) loadOperation.getDownloadedLengthFromOffset(currentOffset, readLength)[0];
                     if (availableLength == 0) {
                         countDownLatch = new CountDownLatch(1);
                         FileLoadOperation loadOperation = FileLoader.getInstance(currentAccount).loadStreamFile(this, document, null, parentObject, currentOffset, true, getCurrentPriority());
+                        checkDownloadCancelled();
                         if (this.loadOperation != loadOperation) {
 //                            FileLog.e("FileStreamLoadOperation " + document.id + " read: changed operation!");
                             this.loadOperation.removeStreamListener(this);
@@ -295,6 +300,9 @@ public class FileStreamLoadOperation implements DataSource, FileLoadOperationStr
                     bytesTransferred += bytesRead;
                     bytesTransferred(bytesRead);
                 }
+            } catch (FileNotFoundException e) {
+                // Keep the non-retryable type: wrapping it makes ExoPlayer retry the cancelled download.
+                throw e;
             } catch (InterruptedException e) {
                 FileLog.e(e);
                 return C.RESULT_NOTHING_READ;
@@ -302,6 +310,22 @@ public class FileStreamLoadOperation implements DataSource, FileLoadOperationStr
                 throw new IOException(e);
             }
             return bytesRead;
+        }
+    }
+
+    private volatile boolean downloadCancelled;
+
+    @Override
+    public boolean isDownloadCancelled() {
+        if (loadOperation != null && loadOperation.isCancelled()) {
+            downloadCancelled = true;
+        }
+        return downloadCancelled;
+    }
+
+    private void checkDownloadCancelled() throws FileNotFoundException {
+        if (isDownloadCancelled()) {
+            throw new FileNotFoundException("Download cancelled by user");
         }
     }
 
