@@ -766,6 +766,17 @@ public class FileLoadOperation {
     }
 
     protected long[] getDownloadedLengthFromOffset(final long offset, final long length) {
+        // Reads of bytes already on disk must not wait behind unrelated stageQueue work.
+        if (state == stateFinished) {
+            return new long[]{length, 1};
+        }
+        final ArrayList<Range> ranges = notLoadedBytesRangesCopy;
+        if (state == stateDownloading && ranges != null && !ranges.isEmpty()) {
+            final long available = getDownloadedLengthFromOffsetInternal(ranges, offset, length);
+            if (available > 0) {
+                return new long[]{available, state == stateFinished ? 1 : 0};
+            }
+        }
         final CountDownLatch countDownLatch = new CountDownLatch(1);
         final long[] result = new long[2];
         Utilities.stageQueue.postRunnable(() -> {
@@ -821,7 +832,11 @@ public class FileLoadOperation {
         if (notLoadedBytesRanges == null) {
             return;
         }
-        notLoadedBytesRangesCopy = new ArrayList<>(notLoadedBytesRanges);
+        final ArrayList<Range> copy = new ArrayList<>(notLoadedBytesRanges.size());
+        for (Range range : notLoadedBytesRanges) {
+            copy.add(new Range(range.start, range.end));
+        }
+        notLoadedBytesRangesCopy = copy;
     }
 
     public void pause() {

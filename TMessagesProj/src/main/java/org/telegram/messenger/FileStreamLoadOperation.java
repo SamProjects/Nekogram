@@ -52,6 +52,7 @@ public class FileStreamLoadOperation implements DataSource, FileLoadOperationStr
     private long currentOffset;
     private CountDownLatch countDownLatch;
     private RandomAccessFile file;
+    private boolean cachedFileRead;
     private TLRPC.Document document;
     private Object parentObject;
     private int currentAccount;
@@ -86,6 +87,7 @@ public class FileStreamLoadOperation implements DataSource, FileLoadOperationStr
     @Override
     public long open(DataSpec dataSpec) throws IOException {
         uri = dataSpec.uri;
+        isNetwork = true;
         transferInitializing(dataSpec);
         currentAccount = Utilities.parseInt(uri.getQueryParameter("account"));
         parentObject = FileLoader.getInstance(currentAccount).getParentObject(Utilities.parseInt(uri.getQueryParameter("rid")));
@@ -107,6 +109,16 @@ public class FileStreamLoadOperation implements DataSource, FileLoadOperationStr
         allStreams.put(document.id, this);
         currentOffset = dataSpec.position;
         requestedLength = dataSpec.length;
+        cachedFileRead = false;
+        loadOperation = null;
+        bytesTransferred = 0;
+        // A tg:// URI may outlive the download. Recheck the completed file before
+        // entering either the file loader queue or the streaming stage queue.
+        if (tryOpenCachedFile()) {
+            opened = true;
+            transferStarted(dataSpec);
+            return bytesRemaining;
+        }
         loadOperation = FileLoader.getInstance(currentAccount).loadStreamFile(this, document, null, parentObject, currentOffset, false, getCurrentPriority());
         bytesTransferred = 0;
         bytesRemaining = document.size - dataSpec.position;
@@ -137,6 +149,50 @@ public class FileStreamLoadOperation implements DataSource, FileLoadOperationStr
         return bytesRemaining;
     }
 
+    private boolean tryOpenCachedFile() throws IOException {
+        if (document.size <= 0) {
+            return false;
+        }
+        for (boolean forceCache : new boolean[]{false, true}) {
+            final File cached = FileLoader.getInstance(currentAccount).getPathToAttach(document, forceCache);
+            if (cached == null || !cached.isFile() || cached.getName().endsWith(".enc") || cached.length() != document.size) {
+                continue;
+            }
+            final RandomAccessFile candidate;
+            try {
+                candidate = new RandomAccessFile(cached, "r");
+            } catch (IOException e) {
+                continue; // The cache may have been removed after the existence check.
+            }
+            boolean keepOpen = false;
+            try {
+                final long length = candidate.length();
+                if (length != document.size) {
+                    continue;
+                }
+                if (currentOffset > length) {
+                    throw new EOFException("Stream position exceeds the completed file");
+                }
+                candidate.seek(currentOffset);
+                file = candidate;
+                currentFile = cached;
+                bytesRemaining = length - currentOffset;
+                if (requestedLength != C.LENGTH_UNSET) {
+                    bytesRemaining = Math.min(bytesRemaining, requestedLength);
+                }
+                cachedFileRead = true;
+                isNetwork = false;
+                keepOpen = true;
+                return true;
+            } finally {
+                if (!keepOpen) {
+                    candidate.close();
+                }
+            }
+        }
+        return false;
+    }
+
     private int getCurrentPriority() {
         Integer priority = priorityMap.getOrDefault(document.id, null);
         if (priority != null) {
@@ -153,6 +209,16 @@ public class FileStreamLoadOperation implements DataSource, FileLoadOperationStr
         } else if (bytesRemaining == 0) {
 //            FileLog.e("FileStreamLoadOperation " + document.id + " read RESULT_END_OF_INPUT");
             return C.RESULT_END_OF_INPUT;
+        } else if (cachedFileRead) {
+            final int bytesRead = file.read(buffer, offset, (int) Math.min(bytesRemaining, readLength));
+            if (bytesRead == -1) {
+                throw new EOFException("Completed stream file was truncated");
+            }
+            currentOffset += bytesRead;
+            bytesRemaining -= bytesRead;
+            bytesTransferred += bytesRead;
+            bytesTransferred(bytesRead);
+            return bytesRead;
         } else {
             int availableLength = 0;
             int bytesRead;
@@ -259,6 +325,7 @@ public class FileStreamLoadOperation implements DataSource, FileLoadOperationStr
             file = null;
         }
         uri = null;
+        cachedFileRead = false;
         allStreams.remove(document.id);
         if (opened) {
             opened = false;

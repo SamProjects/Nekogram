@@ -23,6 +23,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.TextUtils;
 import android.util.Base64;
 import android.util.LongSparseArray;
@@ -78,6 +79,7 @@ import androidx.media3.exoplayer.video.SurfaceNotValidException;
 
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ApplicationLoader;
+import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.DispatchQueue;
 import org.telegram.messenger.FileLoader;
 import org.telegram.messenger.FileLog;
@@ -119,6 +121,30 @@ public class VideoPlayer implements Player.Listener, VideoListener, AnalyticsLis
     public static final HashSet<Integer> activePlayers = new HashSet<>();
 
     private DispatchQueue workerQueue;
+    private long startupStartedAt = -1;
+    private boolean startupDurationReported;
+    private boolean startupReadyReported;
+    private boolean startupFrameReported;
+
+    private void beginStartup(String source) {
+        startupStartedAt = SystemClock.elapsedRealtime();
+        startupDurationReported = startupReadyReported = startupFrameReported = false;
+        logStartup("prepare source=" + source);
+    }
+
+    private void logStartup(String stage) {
+        if (BuildVars.LOGS_ENABLED && startupStartedAt >= 0) {
+            FileLog.d("VideoPlayer startup id=" + playerId + " elapsed_ms="
+                    + (SystemClock.elapsedRealtime() - startupStartedAt) + " " + stage);
+        }
+    }
+
+    private void reportStartupFrame() {
+        if (!startupFrameReported) {
+            startupFrameReported = true;
+            logStartup("first_frame");
+        }
+    }
     private boolean isStory;
 
     public boolean createdWithAudioTrack() {
@@ -298,6 +324,7 @@ public class VideoPlayer implements Player.Listener, VideoListener, AnalyticsLis
     }
 
     public void preparePlayerLoop(Uri videoUri, String videoType, Uri audioUri, String audioType) {
+        beginStartup("loop");
         this.videoQualities = null;
         this.videoQualityToSelect = null;
         this.videoUri = videoUri;
@@ -343,6 +370,7 @@ public class VideoPlayer implements Player.Listener, VideoListener, AnalyticsLis
     }
 
     private MediaSource mediaSourceFromUri(Uri uri, long videoByteOffset, String type) {
+        logStartup("media_source scheme=" + (uri == null ? "unknown" : uri.getScheme()) + " type=" + type);
         final MediaItem mediaItem = new MediaItem.Builder().setUri(uri).build();
         if (videoByteOffset != 0) {
             return new ProgressiveMediaSource.Factory(
@@ -368,6 +396,7 @@ public class VideoPlayer implements Player.Listener, VideoListener, AnalyticsLis
     }
 
     public void preparePlayer(Uri uri, String type, int priority, long videoByteOffset) {
+        beginStartup(uri == null ? "unknown" : uri.getScheme());
         this.videoQualities = null;
         this.videoQualityToSelect = null;
         this.videoUri = uri;
@@ -390,6 +419,7 @@ public class VideoPlayer implements Player.Listener, VideoListener, AnalyticsLis
     }
 
     public void preparePlayer(ArrayList<Quality> qualities, Quality select) {
+        beginStartup("qualities");
         this.videoQualities = qualities;
         this.videoQualityToSelect = select;
         this.videoUri = null;
@@ -1369,6 +1399,7 @@ public class VideoPlayer implements Player.Listener, VideoListener, AnalyticsLis
 
     @Override
     public void onRenderedFirstFrame(EventTime eventTime, Object output, long renderTimeMs) {
+        reportStartupFrame();
         fallbackPosition = C.TIME_UNSET;
         fallbackDuration = C.TIME_UNSET;
         if (delegate != null) {
@@ -1654,6 +1685,10 @@ public class VideoPlayer implements Player.Listener, VideoListener, AnalyticsLis
 
     @Override
     public void onPlayerStateChanged(boolean playWhenReady, int playbackState) {
+        if (playbackState == Player.STATE_READY && !startupReadyReported) {
+            startupReadyReported = true;
+            logStartup("ready");
+        }
         maybeReportPlayerState();
         if (playWhenReady && playbackState == Player.STATE_READY && !isMuted() && shouldPauseOther) {
             NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.playerDidStartPlaying, this);
@@ -1679,6 +1714,7 @@ public class VideoPlayer implements Player.Listener, VideoListener, AnalyticsLis
 
     @Override
     public void onPlayerError(PlaybackException error) {
+        logStartup("error=" + error.errorCode);
         AndroidUtilities.runOnUIThread(() -> {
             Throwable cause = error.getCause();
             if (cause instanceof MediaCodecDecoderException) {
@@ -1753,7 +1789,22 @@ public class VideoPlayer implements Player.Listener, VideoListener, AnalyticsLis
 
     @Override
     public void onRenderedFirstFrame() {
+        reportStartupFrame();
         delegate.onRenderedFirstFrame();
+    }
+
+    @Override
+    public void onTimelineChanged(EventTime eventTime, int reason) {
+        if (!startupDurationReported && player != null && player.getDuration() > 0) {
+            startupDurationReported = true;
+            logStartup("duration_available");
+        }
+    }
+
+    @Override
+    public void onVideoDecoderInitialized(EventTime eventTime, String decoderName,
+                                          long initializedTimestampMs, long initializationDurationMs) {
+        logStartup("video_decoder=" + decoderName + " init_ms=" + initializationDurationMs);
     }
 
     @Override

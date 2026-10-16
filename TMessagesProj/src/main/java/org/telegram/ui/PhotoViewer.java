@@ -10040,12 +10040,23 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     private void updateVideoPlayerTime() {
         Arrays.fill(videoPlayerCurrentTime, 0);
         Arrays.fill(videoPlayerTotalTime, 0);
+        if (!inPreview && currentMessageObject != null && imagesArrLocals.isEmpty()) {
+            final long knownSeconds = Math.max(0, (long) currentMessageObject.getDuration());
+            videoPlayerTotalTime[0] = (int) (knownSeconds / 60);
+            videoPlayerTotalTime[1] = (int) (knownSeconds % 60);
+        }
         if (videoPlayer != null) {
             long current = Math.max(0, videoPlayer.getCurrentPosition());
             if (shownControlsByEnd && !actionBarWasShownBeforeByEnd) {
                 current = 0;
             }
-            long total = Math.max(0, videoPlayer.getDuration());
+            long duration = videoPlayer.getDuration();
+            // Show Telegram's known duration while the extractor is preparing.
+            // This is only a label fallback; seeking still uses the player's timeline.
+            if (duration <= 0 && !inPreview && currentMessageObject != null && imagesArrLocals.isEmpty()) {
+                duration = (long) (currentMessageObject.getDuration() * 1000);
+            }
+            long total = Math.max(0, duration);
             if (!inPreview && videoTimelineViewContainer.getVisibility() == View.VISIBLE) {
                 total *= (videoTimelineView.getRightProgress() - videoTimelineView.getLeftProgress());
                 current -= videoTimelineView.getLeftProgress() * total;
@@ -10440,6 +10451,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     private void preparePlayer(ArrayList<VideoPlayer.Quality> videoUrises, Uri uri, boolean playWhenReady, boolean preview, MediaController.SavedFilterState savedFilterState, boolean livePhoto, long videoByteOffset) {
+        final long playerSetupStartedAt = SystemClock.elapsedRealtime();
         if (!preview) {
             currentPlayingVideoFile = uri;
             currentPlayingVideoQualityFiles = videoUrises;
@@ -10768,6 +10780,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         shouldSavePositionForCurrentVideoShortTerm = null;
         lastSaveTime = 0;
         if (newPlayerCreated) {
+            if (BuildVars.LOGS_ENABLED) {
+                FileLog.d("PhotoViewer video player_setup elapsed_ms=" + (SystemClock.elapsedRealtime() - playerSetupStartedAt));
+            }
             seekToProgressPending = seekToProgressPending2;
             videoPlayerSeekbar.setProgress(0);
             videoTimelineView.setProgress(videoTimelineView.getLeftProgress());
@@ -20735,6 +20750,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
 
 
     private void onActionClick(boolean download) {
+        final long sourceLookupStartedAt = SystemClock.elapsedRealtime();
         if (currentMessageObject == null && currentBotInlineResult == null && (pageBlocksAdapter == null || currentFileNames[0] == null) && sendPhotoType != SELECT_TYPE_NO_SELECT) {
             return;
         }
@@ -20858,6 +20874,10 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             if (sharedMediaType == MediaDataController.MEDIA_FILE && currentMessageObject != null && !currentMessageObject.canPreviewDocument()) {
                 AndroidUtilities.openDocument(currentMessageObject, parentActivity, null);
                 return;
+            }
+            if (BuildVars.LOGS_ENABLED) {
+                FileLog.d("PhotoViewer video source_lookup elapsed_ms=" + (SystemClock.elapsedRealtime() - sourceLookupStartedAt)
+                        + " cached=" + (uri != null && "file".equalsIgnoreCase(uri.getScheme())));
             }
             preparePlayer(videoUrises, uri, true, false, currentMessageObject != null && currentMessageObject.isLivePhoto());
             videoSizeSet = true;
