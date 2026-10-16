@@ -336,6 +336,7 @@ public class MessageDetailsActivity extends BaseNekoSettingsActivity implements 
         }
         if (!TextUtils.isEmpty(getMessageHelper().getMessagePlainText(messageObject))) {
             var item = TextDetailSettingsCellFactory.of(languageRow, "Language", "Loading...");
+            items.add(item);
             LanguageDetector.detectLanguage(
                     getMessageHelper().getMessagePlainText(messageObject),
                     lang -> {
@@ -343,10 +344,11 @@ public class MessageDetailsActivity extends BaseNekoSettingsActivity implements 
                         notifyItemChanged(languageRow);
                     },
                     e -> {
-                        item.subtext = e.getLocalizedMessage();
+                        item.subtext = e != null && !TextUtils.isEmpty(e.getLocalizedMessage())
+                                ? e.getLocalizedMessage()
+                                : LocaleController.getString(R.string.LanguageUnknownTitle);
                         notifyItemChanged(languageRow);
                     });
-            items.add(item);
         }
         if (!TextUtils.isEmpty(messageObject.messageOwner.message) && MessageHelper.isLinkOrEmojiOnlyMessage(messageObject)) {
             items.add(TextDetailSettingsCellFactory.of(linkOrEmojiOnlyRow, "Link or emoji only", "Yes"));

@@ -340,7 +340,15 @@ public abstract class BaseNekoSettingsActivity extends BaseFragment {
     }
 
     protected void notifyItemChanged(int itemId, Object payload) {
-        listView.adapter.notifyItemChanged(listView.findPositionByItemId(itemId), payload);
+        // fillItems can invoke synchronous callbacks from the recycler constructor,
+        // before the assignment to listView (or its adapter) has completed.
+        if (isFinished || listView == null || listView.adapter == null) {
+            return;
+        }
+        int position = listView.findPositionByItemId(itemId);
+        if (position >= 0) {
+            listView.adapter.notifyItemChanged(position, payload);
+        }
     }
 
     protected void notifyItemRemoved(int itemId) {
