@@ -159,6 +159,7 @@ public class NekoChatSettingsActivity extends BaseNekoSettingsActivity {
         items.add(UItem.asHeader(LocaleController.getString(R.string.MessageMenu)));
         items.add(TextCheckbox2CellFactory.of(messageMenuRow + 1, LocaleController.getString(R.string.DeleteDownloadedFile)).slug("showDeleteDownloadedFile").setChecked(NekoConfig.showDeleteDownloadedFile));
         items.add(TextCheckbox2CellFactory.of(messageMenuRow + 2, LocaleController.getString(R.string.NoQuoteForward)).slug("showNoQuoteForward").setChecked(NekoConfig.showNoQuoteForward));
+        items.add(TextCheckbox2CellFactory.of(messageMenuRow + 13, LocaleController.getString(R.string.SourceForward)).slug("showSourceForward").setChecked(NekoConfig.showSourceForward));
         items.add(TextCheckbox2CellFactory.of(messageMenuRow + 3, LocaleController.getString(R.string.AddToSavedMessages)).slug("showAddToSavedMessages").setChecked(NekoConfig.showAddToSavedMessages));
         items.add(TextCheckbox2CellFactory.of(messageMenuRow + 4, LocaleController.getString(R.string.Repeat)).slug("showRepeat").setChecked(NekoConfig.showRepeat));
         items.add(TextCheckbox2CellFactory.of(messageMenuRow + 5, LocaleController.getString(R.string.Prpr)).slug("showPrPr").setChecked(NekoConfig.showPrPr));
@@ -353,6 +354,9 @@ public class NekoChatSettingsActivity extends BaseNekoSettingsActivity {
             } else if (menuPosition == 10) {
                 NekoConfig.toggleShowQrCode();
                 cell.setChecked(NekoConfig.showQrCode);
+            } else if (menuPosition == 12) {
+                NekoConfig.toggleShowSourceForward();
+                cell.setChecked(NekoConfig.showSourceForward);
             } else if (menuPosition == 11) {
                 NekoConfig.toggleShowOpenIn();
                 cell.setChecked(NekoConfig.showOpenIn);

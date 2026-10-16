@@ -347,4 +347,6 @@
     <string name="InvalidPassQr">通行密钥二维码无效</string>
     <!-- Accessibility -->
     <string name="AccessibilitySettings">无障碍设置</string>
+    <string name="SourceForward">保存来源转发</string>
+    <string name="ForwardSourcePrefix">"转发自："</string>
 </resources>

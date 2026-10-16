@@ -337,6 +337,7 @@ import org.telegram.ui.iv.RichEditorListView;
 import org.telegram.ui.iv.RichHtml;
 
 import tw.nekomimi.nekogram.BackButtonMenuRecent;
+import tw.nekomimi.nekogram.forward.SourceForwardMessage;
 import tw.nekomimi.nekogram.forward.ForwardContext;
 import tw.nekomimi.nekogram.forward.ForwardDrawable;
 import tw.nekomimi.nekogram.forward.ForwardItem;
@@ -1300,6 +1301,7 @@ public class ChatActivity extends BaseFragment implements
     public final static int OPTION_WELCOME_REVERT = 116;
     public final static int OPTION_SEND_MONEY = 117;
     public final static int OPTION_GROUP_SPEECH = 118;
+    public final static int OPTION_FORWARD_WITH_SOURCE = 119;
 
     private final static int[] allowedNotificationsDuringChatListAnimations = new int[]{
             NotificationCenter.messagesRead,
@@ -34052,6 +34054,7 @@ public class ChatActivity extends BaseFragment implements
             }
             case OPTION_FORWARD:
             case OPTION_FORWARD_NOQUOTE:
+            case OPTION_FORWARD_WITH_SOURCE:
             case OPTION_FORWARD_NOCAPTION:{
                 if (getMessagesController().isFrozen()) {
                     AccountFrozenAlert.show(currentAccount);
@@ -34060,8 +34063,11 @@ public class ChatActivity extends BaseFragment implements
                     selectedObjectGroup = null;
                     return;
                 }
-                setForwardParams(option == OPTION_FORWARD_NOQUOTE, option == OPTION_FORWARD_NOCAPTION);
-                ForwardItem.setLastForwardOption(option);
+                setForwardParams(option == OPTION_FORWARD_NOQUOTE || option == OPTION_FORWARD_WITH_SOURCE, option == OPTION_FORWARD_NOCAPTION);
+                forwardParams.preserveSource = option == OPTION_FORWARD_WITH_SOURCE;
+                if (!forwardParams.preserveSource) {
+                    ForwardItem.setLastForwardOption(option);
+                }
                 forwardingMessage = selectedObject;
                 forwardingMessageGroup = selectedObjectGroup;
                 if (NekoConfig.quickForward) {
@@ -35298,7 +35304,7 @@ public class ChatActivity extends BaseFragment implements
                 }
             }
         }
-        return fmessages;
+        return forwardParams.preserveSource ? SourceForwardMessage.prepare(fmessages) : fmessages;
     }
 
     public void showSuggestionOfferForEditMessage(MessageSuggestionParams oldParams) {
@@ -35386,6 +35392,11 @@ public class ChatActivity extends BaseFragment implements
                     }
                 }
             }
+        }
+        if (forwardParams.preserveSource) {
+            final ArrayList<MessageObject> prepared = SourceForwardMessage.prepare(fmessages);
+            fmessages.clear();
+            fmessages.addAll(prepared);
         }
         for (int j = 0; j < dids.size(); j++) {
             TLRPC.Chat chat = getMessagesController().getChat(-dids.get(j).dialogId);
@@ -47442,6 +47453,12 @@ public class ChatActivity extends BaseFragment implements
                     if (NekoConfig.showNoQuoteForward) {
                         items.add(LocaleController.getString(R.string.NoQuoteForwardShort));
                         options.add(OPTION_FORWARD_NOQUOTE);
+                        icons.add(R.drawable.msg_forward);
+                    }
+                    if (NekoConfig.showSourceForward && SourceForwardMessage.canPrepare(selectedObject)
+                            && (selectedObjectGroup == null || selectedObjectGroup.messages.stream().allMatch(SourceForwardMessage::canPrepare))) {
+                        items.add(LocaleController.getString(R.string.SourceForward));
+                        options.add(OPTION_FORWARD_WITH_SOURCE);
                         icons.add(R.drawable.msg_forward);
                     }
                     if (NekoConfig.showSetReminder) {

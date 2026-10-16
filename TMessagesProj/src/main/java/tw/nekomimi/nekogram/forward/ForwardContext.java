@@ -72,6 +72,7 @@ public interface ForwardContext {
     }
 
     default void setForwardParams(boolean noquote, boolean nocaption) {
+        forwardParams.preserveSource = false;
         forwardParams.noQuote = noquote || nocaption;
         forwardParams.noCaption = nocaption;
         forwardParams.notify = true;
@@ -79,6 +80,7 @@ public interface ForwardContext {
     }
 
     default void setForwardParams(boolean noquote) {
+        forwardParams.preserveSource = false;
         forwardParams.noQuote = noquote;
         forwardParams.noCaption = false;
         forwardParams.notify = true;
@@ -86,6 +88,7 @@ public interface ForwardContext {
     }
 
     class ForwardParams {
+        public boolean preserveSource = false;
         public boolean noQuote = false;
         public boolean noCaption = false;
         public boolean notify = true;

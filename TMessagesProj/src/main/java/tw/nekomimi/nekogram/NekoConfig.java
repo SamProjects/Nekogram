@@ -124,6 +124,7 @@ public class NekoConfig {
     public static boolean showDeleteDownloadedFile = false;
     public static boolean showMessageDetails = false;
     public static boolean showNoQuoteForward = false;
+    public static boolean showSourceForward = true;
     public static boolean showOpenIn = false;
     public static boolean showOriginal = true;
     public static boolean showPrPr = false;
@@ -231,6 +232,7 @@ public class NekoConfig {
             showDeleteDownloadedFile = preferences.getBoolean("showDeleteDownloadedFile", false);
             showMessageDetails = preferences.getBoolean("showMessageDetails", false);
             showNoQuoteForward = preferences.getBoolean("showNoQuoteForward", false);
+            showSourceForward = preferences.getBoolean("showSourceForward", true);
             showOpenIn = preferences.getBoolean("showOpenIn", false);
             showOriginal = preferences.getBoolean("showOriginal", true);
             showPrPr = preferences.getBoolean("showPrPr", false);
@@ -437,6 +439,9 @@ public class NekoConfig {
         }
         if (preferences.contains("showMessageDetails")) {
             object.addProperty("showMessageDetails", preferences.getBoolean("showMessageDetails", false));
+        }
+        if (preferences.contains("showSourceForward")) {
+            object.addProperty("showSourceForward", preferences.getBoolean("showSourceForward", true));
         }
         if (preferences.contains("showNoQuoteForward")) {
             object.addProperty("showNoQuoteForward", preferences.getBoolean("showNoQuoteForward", false));
@@ -697,6 +702,9 @@ public class NekoConfig {
         }
         if (object.has("showMessageDetails")) {
             editor.putBoolean("showMessageDetails", object.get("showMessageDetails").getAsBoolean());
+        }
+        if (object.has("showSourceForward")) {
+            editor.putBoolean("showSourceForward", object.get("showSourceForward").getAsBoolean());
         }
         if (object.has("showNoQuoteForward")) {
             editor.putBoolean("showNoQuoteForward", object.get("showNoQuoteForward").getAsBoolean());
@@ -1065,6 +1073,11 @@ public class NekoConfig {
     public static void toggleShowMessageDetails() {
         showMessageDetails = !showMessageDetails;
         preferences.edit().putBoolean("showMessageDetails", showMessageDetails).apply();
+    }
+
+    public static void toggleShowSourceForward() {
+        showSourceForward = !showSourceForward;
+        preferences.edit().putBoolean("showSourceForward", showSourceForward).apply();
     }
 
     public static void toggleShowNoQuoteForward() {

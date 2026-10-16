@@ -129,6 +129,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
+import tw.nekomimi.nekogram.forward.SourceForwardMessage;
 import tw.nekomimi.nekogram.NekoConfig;
 
 public class SendMessagesHelper extends BaseController implements NotificationCenter.NotificationCenterDelegate {
@@ -2306,6 +2307,15 @@ public class SendMessagesHelper extends BaseController implements NotificationCe
                 canSendMusic = ChatObject.canSendMusic(chat);
             }
 
+            // Validate the whole copied album before starting any grouped send.
+            if (chat != null) {
+                for (MessageObject message : messages) {
+                    if (message instanceof SourceForwardMessage) {
+                        final int error = canSendMessageToChat(chat, message);
+                        if (error != 0) return error;
+                    }
+                }
+            }
             LongSparseArray<Long> groupsMap = new LongSparseArray<>();
             ArrayList<MessageObject> objArr = new ArrayList<>();
             ArrayList<TLRPC.Message> arr = new ArrayList<>();
@@ -2319,6 +2329,24 @@ public class SendMessagesHelper extends BaseController implements NotificationCe
             long lastGroupedId;
             for (int a = 0; a < messages.size(); a++) {
                 MessageObject msgObj = messages.get(a);
+                if (msgObj instanceof SourceForwardMessage source) {
+                    HashMap<String, String> sourceParams = null;
+                    if (source.getGroupId() != 0) {
+                        Long groupId = groupsMap.get(source.getGroupId());
+                        if (groupId == null) {
+                            groupId = Utilities.random.nextLong();
+                            groupsMap.put(source.getGroupId(), groupId);
+                        }
+                        sourceParams = new HashMap<>();
+                        sourceParams.put("groupId", Long.toString(groupId));
+                        if (a == messages.size() - 1 || messages.get(a + 1).getGroupId() != source.getGroupId()) {
+                            sourceParams.put("final", "1");
+                        }
+                    }
+                    source.send(this, peer, replyToTopMsg, notify, scheduleDate, scheduleRepeatPeriod,
+                            payStars, monoForumPeerId, suggestionParams, sourceParams);
+                    continue;
+                }
                 if (msgObj.getId() <= 0 || msgObj.needDrawBluredPreview()) {
                     if (msgObj.type == MessageObject.TYPE_TEXT && !TextUtils.isEmpty(msgObj.messageText)) {
                         TLRPC.WebPage webPage = msgObj.messageOwner.media != null ? msgObj.messageOwner.media.webpage : null;
@@ -2972,7 +3000,12 @@ public class SendMessagesHelper extends BaseController implements NotificationCe
             }
             if (sendResult == 0) {
                 for (int a = 0; a < messages.size(); a++) {
-                    processForwardFromMyName(messages.get(a), peer, payStars, monoForumPeerId, suggestionParams);
+                    if (messages.get(a) instanceof SourceForwardMessage source) {
+                        source.send(this, peer, replyToTopMsg, notify, scheduleDate, scheduleRepeatPeriod,
+                                payStars, monoForumPeerId, suggestionParams, null);
+                    } else {
+                        processForwardFromMyName(messages.get(a), peer, payStars, monoForumPeerId, suggestionParams);
+                    }
                 }
             }
         }
