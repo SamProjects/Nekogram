@@ -224,7 +224,8 @@ public class FileLoadOperation {
     public long totalBytesCount;
     private long bytesCountPadding;
     private long streamStartOffset;
-    private long streamPriorityStartOffset;
+    // A negative sentinel allows the first chunk (offset zero) to be urgent too.
+    private long streamPriorityStartOffset = -1;
     private RequestInfo priorityRequestInfo;
     private FileLoadOperationDelegate delegate;
     private byte[] key;
@@ -2284,6 +2285,18 @@ public class FileLoadOperation {
         FileRefController.getInstance(currentAccount).requestReference(parentObject, location, this, requestInfo);
     }
 
+    static int selectDownloadConnection(int requestCount, int connectionCount, int previousConnection, boolean urgent) {
+        int playbackConnection = ConnectionsManager.ConnectionTypeDownload |
+                ((ConnectionsManager.DownloadConnectionsCount - 1) << 16);
+        if (urgent) {
+            return playbackConnection;
+        }
+        if (previousConnection != -1 && previousConnection != playbackConnection) {
+            return previousConnection;
+        }
+        return ConnectionsManager.ConnectionTypeDownload | ((requestCount & (connectionCount - 1)) << 16);
+    }
+
     protected void startDownloadRequest(int useConnectionType) {
         Utilities.stageQueue.cancelRunnable(pacedDownloadRequest);
         if (BuildVars.DEBUG_PRIVATE_VERSION) {
@@ -2298,7 +2311,7 @@ public class FileLoadOperation {
             state = stateDownloading;
         }
         if (paused || reuploadingCdn || state != stateDownloading || requestingReference ||
-                (!isStory && streamPriorityStartOffset == 0 && (!nextPartWasPreloaded && (requestInfos.size() + delayedRequestInfos.size() >= currentMaxDownloadRequests))) ||
+                (!isStory && streamPriorityStartOffset < 0 && (!nextPartWasPreloaded && (requestInfos.size() + delayedRequestInfos.size() >= currentMaxDownloadRequests))) ||
                 (isPreloadVideoOperation && (requestedBytesCount > preloadMaxBytes || moovFound != 0 && requestInfos.size() > 0))) {
             if (BuildVars.LOGS_ENABLED && FULL_LOGS) {
                 FileLog.d(fileName + " can't start request wrong state: paused=" + paused + " reuploadingCdn=" + reuploadingCdn + " state=" + state + " requestingReference=" + requestingReference);
@@ -2309,7 +2322,7 @@ public class FileLoadOperation {
         if (isStory) {
             count = Math.max(0, currentMaxDownloadRequests - requestInfos.size());
         } else {
-            if (streamPriorityStartOffset == 0 && !nextPartWasPreloaded && (!isPreloadVideoOperation || moovFound != 0) && totalBytesCount > 0) {
+            if (streamPriorityStartOffset < 0 && !nextPartWasPreloaded && (!isPreloadVideoOperation || moovFound != 0) && totalBytesCount > 0) {
                 count = Math.max(0, currentMaxDownloadRequests - requestInfos.size() -
                         (useDownloadByteBudget ? delayedRequestInfos.size() : 0));
             }
@@ -2373,7 +2386,7 @@ public class FileLoadOperation {
                 preloadNotRequestedBytesCount -= currentDownloadChunkSize;
             } else {
                 if (notRequestedBytesRanges != null) {
-                    long streamOffset = streamPriorityStartOffset != 0 ? streamPriorityStartOffset : streamStartOffset;
+                    long streamOffset = streamPriorityStartOffset >= 0 ? streamPriorityStartOffset : streamStartOffset;
                     int size = notRequestedBytesRanges.size();
                     long minStart = Long.MAX_VALUE;
                     long minStreamStart = Long.MAX_VALUE;
@@ -2428,13 +2441,11 @@ public class FileLoadOperation {
             boolean isLast = totalBytesCount <= 0 || a == count - 1 || totalBytesCount > 0 && downloadOffset + currentDownloadChunkSize >= totalBytesCount;
             final TLObject request;
             int connectionType;
-            if (useConnectionType == -1) {
-                // Both pool sizes are powers of two; keep the index valid if the counter wraps.
-                connectionType = ConnectionsManager.ConnectionTypeDownload | ((requestsCount & (downloadConnectionsCount - 1)) << 16);
-                //globalRequestPointer++;
-            } else {
-                connectionType = useConnectionType;
-            }
+            // Keep an urgent player read off the two bulk-video connections.
+            // Responses re-enter this method with their connection type: do not
+            // let that turn the playback connection into a bulk download lane.
+            connectionType = selectDownloadConnection(requestsCount, downloadConnectionsCount,
+                    useConnectionType, streamPriorityStartOffset >= 0);
 
             int flags = (isForceRequest ? ConnectionsManager.RequestFlagForceDownload : 0);
             if (useDownloadByteBudget) {
@@ -2498,11 +2509,11 @@ public class FileLoadOperation {
                 }
             }
 
-            if (streamPriorityStartOffset != 0) {
+            if (streamPriorityStartOffset >= 0) {
                 if (BuildVars.DEBUG_VERSION) {
                     FileLog.d("frame get offset = " + streamPriorityStartOffset);
                 }
-                streamPriorityStartOffset = 0;
+                streamPriorityStartOffset = -1;
                 priorityRequestInfo = requestInfo;
             }
             if (location instanceof TLRPC.TL_inputPeerPhotoFileLocation) {

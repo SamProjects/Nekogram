@@ -119,7 +119,7 @@ public class FileStreamLoadOperation implements DataSource, FileLoadOperationStr
             transferStarted(dataSpec);
             return bytesRemaining;
         }
-        loadOperation = FileLoader.getInstance(currentAccount).loadStreamFile(this, document, null, parentObject, currentOffset, false, getCurrentPriority());
+        loadOperation = FileLoader.getInstance(currentAccount).loadStreamFile(this, document, null, parentObject, currentOffset, true, getCurrentPriority());
         bytesTransferred = 0;
         bytesRemaining = document.size - dataSpec.position;
         if (requestedLength != C.LENGTH_UNSET) {
@@ -230,7 +230,7 @@ public class FileStreamLoadOperation implements DataSource, FileLoadOperationStr
                     availableLength = (int) loadOperation.getDownloadedLengthFromOffset(currentOffset, readLength)[0];
                     if (availableLength == 0) {
                         countDownLatch = new CountDownLatch(1);
-                        FileLoadOperation loadOperation = FileLoader.getInstance(currentAccount).loadStreamFile(this, document, null, parentObject, currentOffset, false, getCurrentPriority());
+                        FileLoadOperation loadOperation = FileLoader.getInstance(currentAccount).loadStreamFile(this, document, null, parentObject, currentOffset, true, getCurrentPriority());
                         if (this.loadOperation != loadOperation) {
 //                            FileLog.e("FileStreamLoadOperation " + document.id + " read: changed operation!");
                             this.loadOperation.removeStreamListener(this);
@@ -271,7 +271,7 @@ public class FileStreamLoadOperation implements DataSource, FileLoadOperationStr
                             } catch (Throwable e) {
                                 if (loadOperation.isFinished() && !currentFile.exists()) {
                                     FileLoader.getInstance(currentAccount).cancelLoadFile(loadOperation.getFileName());
-                                    FileLoadOperation newLoadOperation = FileLoader.getInstance(currentAccount).loadStreamFile(this, document, null, parentObject, currentOffset, false, getCurrentPriority());
+                                    FileLoadOperation newLoadOperation = FileLoader.getInstance(currentAccount).loadStreamFile(this, document, null, parentObject, currentOffset, true, getCurrentPriority());
                                     if (this.loadOperation != newLoadOperation) {
 //                            FileLog.e("FileStreamLoadOperation " + document.id + " read: changed operation!");
                                         this.loadOperation.removeStreamListener(this);

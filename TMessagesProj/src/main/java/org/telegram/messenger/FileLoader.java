@@ -867,7 +867,8 @@ public class FileLoader extends BaseController {
             }
             operation.getQueue().add(operation);
             operation.updateProgress();
-            if (priorityChanged) {
+            // A seek can change the required chunk without changing file priority.
+            if (priorityChanged || stream != null) {
                 operation.getQueue().checkLoadingOperations();
             }
 //            FileLog.d("load operation update position fileName=" + finalFileName + " position in queue " + operation.getPositionInQueue() + " preloadFinish " + operation.isPreloadFinished() + " priority=" + operation.getPriority());
