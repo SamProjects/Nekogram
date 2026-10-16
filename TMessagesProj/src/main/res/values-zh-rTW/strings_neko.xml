@@ -332,5 +332,5 @@
     <string name="AccessibilitySettings">無障礙設定</string>
     <string name="GroupSpeech">群組發言</string>
     <string name="SourceForward">保留來源轉傳</string>
-    <string name="ForwardSourcePrefix">"轉發自："</string>
+    <string name="ForwardSourcePrefix">轉發自：</string>
 </resources>

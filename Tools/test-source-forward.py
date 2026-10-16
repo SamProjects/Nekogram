@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import re
+import json
 import xml.etree.ElementTree as ET
 
 root = Path(__file__).resolve().parents[1]
@@ -95,7 +96,7 @@ public class ChatObject {
 """,
     "org/telegram/messenger/LocaleController.java": """
 package org.telegram.messenger;
-public class LocaleController { public static String getString(int id) { return "转发自："; } }
+public class LocaleController { public static String getString(int id) { return RESOURCE_PREFIX; } }
 """,
     "org/telegram/messenger/R.java": """
 package org.telegram.messenger;
@@ -122,6 +123,9 @@ public class SendMessagesHelper {
 }
 """,
 }
+
+prefix_resource = ET.parse(root / "TMessagesProj/src/main/res/values-zh-rCN/strings_neko.xml").find("string[@name='ForwardSourcePrefix']").text
+stubs["org/telegram/messenger/LocaleController.java"] = stubs["org/telegram/messenger/LocaleController.java"].replace("RESOURCE_PREFIX", json.dumps(prefix_resource, ensure_ascii=False))
 
 # Compile against the actual overload signatures used by production, not a
 # permissive varargs stand-in, so API drift fails this test as well.
@@ -172,8 +176,8 @@ public class SourceForwardTest {
         chat.username=null;
         check(!SourceForwardMessage.canPrepare(m),"private basic group has no permalink");
         chat.channel=true;
-        var copy=prepare(m);String expected="原文😀粗体\n\n转发自：https://t.me/c/2553010221/406";
-        check(copy.messageOwner.message.equals(expected),"exact footer and two newlines");
+        var copy=prepare(m);String expected="原文😀粗体\n\n转发自： https://t.me/c/2553010221/406 ";
+        check(copy.messageOwner.message.equals(expected),"unquoted footer, two newlines, and one space on either side of URL");
         check(m.messageOwner.message.equals("原文😀粗体")&&m.messageOwner.entities.size()==1,"original unchanged");
         check(copy.messageOwner.fwd_from==null,"no forward header");
         check(copy.messageOwner.entities.get(0)!=bold,"independent entity objects");
@@ -203,7 +207,7 @@ public class SourceForwardTest {
             check(!Character.isHighSurrogate(text.charAt(text.length()-1)),"surrogate not cut");
             for(var e:(ArrayList<TLRPC.MessageEntity>)part.args[6])check(e.offset>=0&&e.offset+e.length<=text.length(),"entity slice bounds");
         }
-        check(joined.toString().equals(longText+"\n\n转发自：https://t.me/c/2553010221/406"),"split loses no text");
+        check(joined.toString().equals(longText+"\n\n转发自： https://t.me/c/2553010221/406 "),"split loses no text");
         check(bold.offset==4&&bold.length==2,"original formatting offsets unchanged");
         controller.maxMessageLength=4096;
         var photo=original("说明");photo.messageOwner.media=new TLRPC.TL_messageMediaPhoto();photo.messageOwner.media.photo=new TLRPC.TL_photo();

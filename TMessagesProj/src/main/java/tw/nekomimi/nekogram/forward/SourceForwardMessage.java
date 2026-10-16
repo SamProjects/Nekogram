@@ -68,10 +68,10 @@ public class SourceForwardMessage extends MessageObject {
             copy.grouped_id = original.messageOwner.grouped_id;
             copy.attachPath = original.messageOwner.attachPath;
             copy.message = (original.messageOwner.message == null ? "" : original.messageOwner.message)
-                    + "\n\n" + LocaleController.getString(R.string.ForwardSourcePrefix) + sourceLink;
+                    + "\n\n" + LocaleController.getString(R.string.ForwardSourcePrefix) + " " + sourceLink + " ";
             copy.entities = sliceEntities(original.messageOwner.entities, 0, copy.message.length());
             final TLRPC.TL_messageEntityUrl link = new TLRPC.TL_messageEntityUrl();
-            link.offset = copy.message.length() - sourceLink.length();
+            link.offset = copy.message.length() - sourceLink.length() - 1;
             link.length = sourceLink.length();
             copy.entities.add(link);
             copy.flags = 128 | (copy.media == null ? 0 : 512) | (copy.from_id == null ? 0 : 256);

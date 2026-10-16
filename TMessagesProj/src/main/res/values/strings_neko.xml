@@ -370,5 +370,5 @@
     <string name="AccessibilitySettings">Accessibility settings</string>
     <string name="GroupSpeech">Group messages</string>
     <string name="SourceForward">Forward with source</string>
-    <string name="ForwardSourcePrefix">"Forwarded from: "</string>
+    <string name="ForwardSourcePrefix">Forwarded from:</string>
 </resources>
