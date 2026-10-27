@@ -5,7 +5,17 @@ on:
     branches: [ "main", "dev", "ci" ]
     paths-ignore:
       - '**.md'
+      - '.github/workflows/artifact-cleanup.yml'
   workflow_call:
+    inputs:
+      release-tag:
+        description: Existing tag to publish; empty selects the next release version
+        type: string
+        default: ''
+      publish-telegram:
+        description: Publish the release APK to the configured Telegram channel
+        type: boolean
+        default: false
   workflow_dispatch:
 
 concurrency:
@@ -86,20 +96,20 @@ jobs:
         with:
           subject-path: '${{ github.workspace }}/TMessagesProj_App/build/outputs/apk/release/*-arm64-v8a.apk'
 
-      - name: Upload arm64-v8a build apk
-        uses: actions/upload-artifact@v7
-        with:
-          path: TMessagesProj_App/build/outputs/apk/release/*-arm64-v8a.apk
-          archive: false
-
       - name: Determine release version
-        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        if: inputs.release-tag != '' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch'))
         id: release_version
         env:
           GH_TOKEN: ${{ github.token }}
+          REQUESTED_RELEASE_TAG: ${{ inputs.release-tag }}
         shell: bash
         run: |
           set -euo pipefail
+
+          if [[ -n "${REQUESTED_RELEASE_TAG}" ]]; then
+            echo "tag=${REQUESTED_RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
 
           base_version="$(sed -n 's/^APP_VERSION_NAME=//p' gradle.properties | tr -d '\r' | head -n 1)"
           if [[ -z "${base_version}" ]]; then
@@ -139,7 +149,7 @@ jobs:
           echo "Release tag: ${release_tag}"
 
       - name: Publish GitHub Release
-        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        if: inputs.release-tag != '' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch'))
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.release_version.outputs.tag }}
@@ -152,3 +162,13 @@ jobs:
             --target "${GITHUB_SHA}" \
             --title "MediaGroupGram ${RELEASE_TAG}" \
             --generate-notes
+
+      - name: Upload to Telegram
+        if: inputs.publish-telegram
+        uses: nekogram/upload-with-mtcute@e196262c35b722c4c8eac79c835ec6dbd109e4b8
+        with:
+          api-id: ${{ secrets.API_ID }}
+          api-hash: ${{ secrets.API_HASH }}
+          bot-token: ${{ secrets.RELEASE_BOT_TOKEN }}
+          chat-id: ${{ secrets.RELEASE_CHANNEL_ID }}
+          files: TMessagesProj_App/build/outputs/apk/release/*-arm64-v8a.apk
