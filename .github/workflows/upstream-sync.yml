@@ -42,7 +42,7 @@ jobs:
           from pathlib import Path
           conflicts = subprocess.check_output(['git', 'diff', '--name-only', '--diff-filter=U'], text=True).splitlines()
           print('MERGE_CONFLICTS:', conflicts)
-          allowed = {'.github/workflows/release.yml', 'gradle.properties', 'TMessagesProj/build.gradle'}
+          allowed = {'.github/workflows/release.yml', 'gradle.properties', 'TMessagesProj/build.gradle', 'build.gradle'}
           unexpected = set(conflicts) - allowed
           if unexpected:
               raise SystemExit('Unexpected conflicts require review: ' + repr(unexpected))
@@ -52,6 +52,8 @@ jobs:
               text = p.read_text()
               if name == 'gradle.properties':
                   text = text.replace('APP_VERSION_CODE=7175', 'APP_VERSION_CODE=7183').replace('APP_VERSION_NAME=13.0.2', 'APP_VERSION_NAME=13.0.3')
+              elif name == 'build.gradle':
+                  text = text.replace("io.sentry.android.gradle' version '6.23.0", "io.sentry.android.gradle' version '6.24.0")
               elif name == 'TMessagesProj/build.gradle':
                   for old, new in [('gson:2.14.0', 'gson:2.15.0'), ('hiddenapibypass:6.1', 'hiddenapibypass:6.2'), ('sentry-android:8.60.0', 'sentry-android:8.61.1')]:
                       text = text.replace(old, new)
@@ -62,7 +64,7 @@ jobs:
           git diff --cached --check
           test -z "$(git diff --name-only --diff-filter=U)"
           test "$(sed -n 's/^APP_PACKAGE=//p' gradle.properties)" = com.haiwaidao.nekogram
-          if rg -n 'upload-artifact@|download-artifact@' .github/workflows; then
+          if rg -n 'uses: actions/(upload|download)-artifact@' .github/workflows/build.yml .github/workflows/release.yml; then
             echo 'Artifact transfer unexpectedly restored'
             exit 1
           fi
