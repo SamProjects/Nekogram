@@ -1,0 +1,87 @@
+name: Review Upstream Sync
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/upstream-sync.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-review-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - uses: actions/setup-java@v6
+        with:
+          java-version: '25'
+          distribution: temurin
+
+      - name: Merge the pinned upstream revision into an isolated branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'SamProjects'
+          git config user.email 'SamProjects@users.noreply.github.com'
+          git fetch https://github.com/Nekogram/Nekogram.git 449393e9ef070f0057fffca74a70b46288df4704
+          git switch -c sync/upstream-13.0.3
+          if ! git merge --no-commit --no-ff FETCH_HEAD; then
+            python3 - <<'PY'
+          import subprocess
+          from pathlib import Path
+          conflicts = subprocess.check_output(['git', 'diff', '--name-only', '--diff-filter=U'], text=True).splitlines()
+          print('MERGE_CONFLICTS:', conflicts)
+          allowed = {'.github/workflows/release.yml', 'gradle.properties', 'TMessagesProj/build.gradle'}
+          unexpected = set(conflicts) - allowed
+          if unexpected:
+              raise SystemExit('Unexpected conflicts require review: ' + repr(unexpected))
+          for name in conflicts:
+              subprocess.run(['git', 'checkout', '--ours', '--', name], check=True)
+              p = Path(name)
+              text = p.read_text()
+              if name == 'gradle.properties':
+                  text = text.replace('APP_VERSION_CODE=7175', 'APP_VERSION_CODE=7183').replace('APP_VERSION_NAME=13.0.2', 'APP_VERSION_NAME=13.0.3')
+              elif name == 'TMessagesProj/build.gradle':
+                  for old, new in [('gson:2.14.0', 'gson:2.15.0'), ('hiddenapibypass:6.1', 'hiddenapibypass:6.2'), ('sentry-android:8.60.0', 'sentry-android:8.61.1')]:
+                      text = text.replace(old, new)
+              p.write_text(text)
+              subprocess.run(['git', 'add', '--', name], check=True)
+          PY
+          fi
+          git diff --cached --check
+          test -z "$(git diff --name-only --diff-filter=U)"
+          test "$(sed -n 's/^APP_PACKAGE=//p' gradle.properties)" = com.haiwaidao.nekogram
+          if rg -n 'upload-artifact@|download-artifact@' .github/workflows; then
+            echo 'Artifact transfer unexpectedly restored'
+            exit 1
+          fi
+          if rg -n 'firebase-analytics|com.google.gms.google-services' TMessagesProj/build.gradle build.gradle; then
+            echo 'Firebase was unexpectedly restored'
+            exit 1
+          fi
+          git diff --cached --stat
+          git commit -m 'Merge upstream 13.0.3 for review; preserve custom features and artifact-free releases'
+          git push origin HEAD:refs/heads/sync/upstream-13.0.3
+          echo "SYNC_COMMIT=$(git rev-parse HEAD)"
+
+      - name: Run custom feature regression checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 Tools/test-message-details.py
+          python3 Tools/test-message-jump-cache.py
+          python3 Tools/test-source-forward.py
+          python3 Tools/test-video-startup.py
+          python3 Tools/test-playback-priority.py
+          node Tools/test-global-media-cross-flow.cjs
