@@ -1,0 +1,46 @@
+name: Clean Actions Artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/artifact-cleanup.yml'
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: artifact-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete existing Actions artifacts and verify storage is empty
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const args = {...context.repo, per_page: 100};
+            const artifacts = await github.paginate(github.rest.actions.listArtifactsForRepo, args);
+            const bytes = artifacts.reduce((total, artifact) => total + artifact.size_in_bytes, 0);
+            core.info('Found ' + artifacts.length + ' artifacts (' + bytes + ' bytes)');
+            let deleted = 0;
+            for (const artifact of artifacts) {
+              try {
+                await github.rest.actions.deleteArtifact({...context.repo, artifact_id: artifact.id});
+                deleted++;
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+            }
+            const remaining = await github.rest.actions.listArtifactsForRepo({...context.repo, per_page: 1});
+            await core.summary.addHeading('Actions artifact cleanup')
+              .addRaw('Deleted: ' + deleted + '\\nBytes removed: ' + bytes + '\\nRemaining: ' + remaining.data.total_count)
+              .write();
+            core.info('Deleted ' + deleted + ' artifacts; remaining: ' + remaining.data.total_count);
+            if (remaining.data.total_count !== 0) {
+              core.setFailed('Artifacts remain. Check for older builds still uploading and rerun cleanup.');
+            }
