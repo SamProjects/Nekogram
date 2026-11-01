@@ -9,6 +9,11 @@ s = (base / 'FileLoadOperation.java').read_text()
 start = s.index('    static int selectDownloadConnection(')
 end = s.index('\n    protected void startDownloadRequest(', start)
 method = s[start:end]
+flag_start = s.index('            int flags = (isForceRequest ?')
+flag_end = s.index('            if (isCdn)', flag_start)
+flags = s[flag_start:flag_end]
+method += '\nstatic int requestFlags(boolean isForceRequest, boolean useDownloadByteBudget, long streamPriorityStartOffset, long totalBytesCount) {\n' + flags + '\nreturn flags;\n}\n'
+
 # Offset zero must not be mistaken for "no urgent read" at any call site.
 assert 'private long streamPriorityStartOffset = -1;' in s
 assert 'streamPriorityStartOffset == 0' not in s
@@ -19,6 +24,7 @@ assert stream.count('parentObject, currentOffset, true, getCurrentPriority()') =
 assert 'if (priorityChanged || stream != null)' in (base / 'FileLoader.java').read_text()
 harness = '''class ConnectionsManager {
 static final int ConnectionTypeDownload=2, DownloadConnectionsCount=8;
+static final int RequestFlagForceDownload=1,RequestFlagDownloadByteBudget=2,RequestFlagSmallDownload=4;
 }
 public class PlaybackPriorityTest {
 METHOD
@@ -36,7 +42,17 @@ for(int count:counts) for(int pool:new int[]{2,8}) {
     if(previous!=-1 && previous!=urgent) check(next==previous);
   }
 }
-System.out.println("Playback connection routing: 64 urgent/normal pairs passed");
+for(boolean budget:new boolean[]{false,true}) for(boolean force:new boolean[]{false,true}) {
+ for(long offset:new long[]{0,90177536L}) {
+  int flags=requestFlags(force,budget,offset,90529229L);
+  check((flags&ConnectionsManager.RequestFlagDownloadByteBudget)==0);
+  check((flags&ConnectionsManager.RequestFlagForceDownload)==(force?1:0));
+ }
+ int bulk=requestFlags(force,budget,-1,90529229L);
+ check((bulk&ConnectionsManager.RequestFlagDownloadByteBudget)==(budget?2:0));
+ check((requestFlags(force,budget,-1,1024)&ConnectionsManager.RequestFlagSmallDownload)==(budget?4:0));
+}
+System.out.println("Playback connection routing: 64 urgent/normal pairs; urgent reads bypass a full bulk byte budget");
 }}
 '''.replace('METHOD',method)
 with tempfile.TemporaryDirectory() as d:

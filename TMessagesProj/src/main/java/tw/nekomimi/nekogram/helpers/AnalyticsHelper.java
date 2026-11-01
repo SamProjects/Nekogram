@@ -59,6 +59,11 @@ public class AnalyticsHelper {
         return Utilities.generateRandomString(32);
     }
 
+    public static void captureException(Exception e) {
+        if (analyticsDisabled || !sendBugReport || e == null) return;
+        Sentry.captureException(e);
+    }
+
     public static void trackFragmentLifecycle(String lifecycle, BaseFragment fragment) {
         if (analyticsDisabled || fragment == null) return;
         var breadcrumb = new Breadcrumb();

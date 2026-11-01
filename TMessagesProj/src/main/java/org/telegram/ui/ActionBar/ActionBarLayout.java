@@ -407,7 +407,19 @@ public class ActionBarLayout extends FrameLayout implements INavigationLayout, F
         @Override
         public void addView(View child, int index, ViewGroup.LayoutParams params) {
             super.addView(child, index, params);
-            ViewCompat.requestApplyInsets(this);
+            applyInsets(this);
+        }
+
+        /**
+         * The last insets straight to this container (and the new fragment in it). requestApplyInsets would dispatch
+         * them through the whole window on the next traversal, on every fragment switch (a frame lost to it).
+         */
+        private void applyInsets(View fallback) {
+            if (lastWindowInsetsCompat != null && getParent() == ActionBarLayout.this) {
+                dispatchApplyWindowInsetsInternal(this, lastWindowInsetsCompat);
+            } else if (fallback != null) {
+                ViewCompat.requestApplyInsets(fallback);
+            }
         }
 
         @Override
@@ -451,7 +463,7 @@ public class ActionBarLayout extends FrameLayout implements INavigationLayout, F
             if (this.edgeToEdgeSupportMode != edgeToEdgeSupportMode) {
                 this.edgeToEdgeSupportMode = edgeToEdgeSupportMode;
                 this.isSupportEdgeToEdge = edgeToEdgeSupportMode != EdgeToEdgeSupportMode.NONE;
-                ViewCompat.requestApplyInsets((View) getParent());
+                applyInsets((View) getParent());
             }
         }
         public void setDrawNavigationBar(boolean drawNavigationBar) {
@@ -696,7 +708,7 @@ public class ActionBarLayout extends FrameLayout implements INavigationLayout, F
 
         if (layerShadowDrawable == null) {
             layerShadowDrawable = getResources().getDrawable(R.drawable.layer_shadow);
-            headerShadowDrawable = NekoConfig.disableAppBarShadow ? null : getResources().getDrawable(R.drawable.header_shadow).mutate();
+            headerShadowDrawable = getResources().getDrawable(R.drawable.header_shadow).mutate();
             scrimPaint = new Paint();
         }
 
@@ -948,7 +960,7 @@ public class ActionBarLayout extends FrameLayout implements INavigationLayout, F
 
     @Override
     public void drawHeaderShadow(Canvas canvas, int alpha, int y) {
-        if (headerShadowDrawable != null && SharedConfig.drawActionBarShadow) {
+        if (headerShadowDrawable != null && SharedConfig.drawActionBarShadow && !NekoConfig.disableAppBarShadow) {
             alpha = alpha / 2;
             if (headerShadowDrawable.getAlpha() != alpha) {
                 headerShadowDrawable.setAlpha(alpha);
@@ -956,11 +968,6 @@ public class ActionBarLayout extends FrameLayout implements INavigationLayout, F
             headerShadowDrawable.setBounds(0, y, getMeasuredWidth(), y + headerShadowDrawable.getIntrinsicHeight());
             headerShadowDrawable.draw(canvas);
         }
-    }
-
-    @Override
-    public void setHeaderShadow(Drawable drawable) {
-        headerShadowDrawable = drawable;
     }
 
     @Keep
